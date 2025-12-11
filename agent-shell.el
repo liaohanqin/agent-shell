@@ -504,9 +504,13 @@ Returns an empty string if no icon should be displayed."
                                 :no-create t)
                                "No shell available")))
         ((derived-mode-p 'agent-shell-mode)
-         (switch-to-buffer (or (agent-shell-viewport--buffer
-                                :shell-buffer (current-buffer))
-                               "Not in a shell viewport buffer")))
+         (when-let ((viewport-buffer (or (agent-shell-viewport--buffer
+                                          :shell-buffer (current-buffer))
+                                         "Not in a shell viewport buffer")))
+           (with-current-buffer viewport-buffer
+             (when (derived-mode-p 'agent-shell-viewport-view-mode)
+               (agent-shell-viewport-refresh)))
+           (switch-to-buffer viewport-buffer)))
         (t
          (user-error "Not in an agent-shell buffer"))))
 
