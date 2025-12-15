@@ -1571,12 +1571,12 @@ variable (see makunbound)."))
       ;; agent-shell does not support restoring sessions from transcript
       ;; via shell-maker. Unalias this functionality so it's not
       ;; misleading to users or appear via M-x.
-      (fmakunbound #'agent-shell-restore-session-from-transcript)
+      (fmakunbound 'agent-shell-restore-session-from-transcript)
       (when agent-shell--transcript-file
         ;; Prefer agent-shell--transcript-file over shell-maker's
         ;; transcript capabilities. Unalias to hide this in favor
         ;; of agent-shell's agent-shell--transcript-file usage.
-        (fmakunbound #'agent-shell-save-session-transcript)
+        (fmakunbound 'agent-shell-save-session-transcript)
         (setq-local shell-maker-prompt-before-killing-buffer nil)))
     ;; Display buffer if no-focus was nil, respecting agent-shell-display-action
     (unless no-focus
