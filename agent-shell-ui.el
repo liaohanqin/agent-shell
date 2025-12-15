@@ -565,6 +565,40 @@ FACE when non-nil applies the specified face to the text."
                          text))
   text)
 
+(defvar-local agent-shell-ui--isearch-opened-fragments nil
+  "List of fragment qualified-ids that were opened during isearch.")
+
+(defun agent-shell-ui--isearch-filter-predicate (beg end)
+  "Custom isearch filter that expands collapsed fragments when matches are found.
+BEG and END define the match region."
+  ;; Check if the match contains invisible text
+  (let ((pos beg)
+        (found-invisible nil))
+    (while (and (< pos end) (not found-invisible))
+      (when (get-text-property pos 'invisible)
+        (setq found-invisible t))
+      (setq pos (1+ pos)))
+
+    ;; If we found invisible text, expand the fragment
+    (when found-invisible
+      (save-excursion
+        (goto-char beg)
+        (when-let* ((state (get-text-property (point) 'agent-shell-ui-state))
+                    (qualified-id (map-elt state :qualified-id))
+                    ((map-elt state :collapsed)))
+          ;; Track which fragments we've opened
+          (unless (member qualified-id agent-shell-ui--isearch-opened-fragments)
+            (push qualified-id agent-shell-ui--isearch-opened-fragments))
+          ;; Expand the fragment
+          (agent-shell-ui-toggle-fragment-at-point))))
+
+    ;; Always return t to include the match
+    t))
+
+(defun agent-shell-ui--isearch-cleanup ()
+  "Clean up isearch state when search ends."
+  (setq agent-shell-ui--isearch-opened-fragments nil))
+
 (defvar agent-shell-ui-mode-map
   (let ((map (make-sparse-keymap)))
     map)
@@ -576,8 +610,18 @@ FACE when non-nil applies the specified face to the text."
   :lighter " SUI"
   :keymap agent-shell-ui-mode-map
   (if agent-shell-ui-mode
-      (cursor-sensor-mode 1)
-    (cursor-sensor-mode -1)))
+      (progn
+        (cursor-sensor-mode 1)
+        ;; Enable searching in invisible text and auto-expansion
+        (setq-local search-invisible 'open-all)
+        ;; Use custom filter predicate to expand fragments during search
+        (setq-local isearch-filter-predicate #'agent-shell-ui--isearch-filter-predicate)
+        ;; Clean up when search ends
+        (add-hook 'isearch-mode-end-hook #'agent-shell-ui--isearch-cleanup nil 'local))
+    (cursor-sensor-mode -1)
+    (kill-local-variable 'search-invisible)
+    (kill-local-variable 'isearch-filter-predicate)
+    (remove-hook 'isearch-mode-end-hook #'agent-shell-ui--isearch-cleanup 'local)))
 
 (provide 'agent-shell-ui)
 
