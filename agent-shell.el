@@ -3733,17 +3733,18 @@ If CAP is non-nil, truncate at CAP."
 
 Context could be either a region or error at point or files.
 The sources checked are controlled by `agent-shell-context-sources'."
-  (seq-some
-   (lambda (source)
-     (pcase source
-       ('files (agent-shell--get-files-context
-                :files (agent-shell--buffer-files :obvious t)))
-       ('region (agent-shell--get-region-context
-                 :deactivate t :no-error t))
-       ('error (agent-shell--get-flymake-error-context))
-       ('line (agent-shell--get-current-line-context))
-       ((pred functionp) (funcall source))))
-   agent-shell-context-sources))
+  (unless (derived-mode-p 'agent-shell-mode)
+    (seq-some
+     (lambda (source)
+       (pcase source
+         ('files (agent-shell--get-files-context
+                  :files (agent-shell--buffer-files :obvious t)))
+         ('region (agent-shell--get-region-context
+                   :deactivate t :no-error t))
+         ('error (agent-shell--get-flymake-error-context))
+         ('line (agent-shell--get-current-line-context))
+         ((pred functionp) (funcall source))))
+     agent-shell-context-sources)))
 
 (cl-defun agent-shell--get-region (&key deactivate)
   "Get the active region as an alist.
