@@ -3703,37 +3703,37 @@ TEXT is the error message."
 
 (defun agent-shell--get-flycheck-error-context ()
   "Get flycheck error at point, ready for sending to agent."
-  (when (and (bound-and-true-p flycheck-mode)
-             (fboundp 'flycheck-overlay-errors-at))
-    (when-let ((errors (flycheck-overlay-errors-at (point))))
-      (mapconcat
-       (lambda (err)
-         (let* ((buffer (current-buffer))
-                (beg (flycheck-error-pos err))
-                (end (when beg
-                       (save-excursion
-                         (goto-char beg)
-                         (if-let ((end-line (flycheck-error-end-line err))
-                                  (end-col (flycheck-error-end-column err)))
-                             (progn
-                               (forward-line (- end-line (line-number-at-pos)))
-                               (move-to-column end-col)
-                               (point))
-                           beg))))
-                (type (flycheck-error-level err))
-                (text (flycheck-error-message err))
-                (line (flycheck-error-line err))
-                (col (flycheck-error-column err)))
-           (agent-shell--format-diagnostic
-            :buffer buffer
-            :beg beg
-            :end end
-            :line line
-            :col col
-            :type type
-            :text text)))
-       errors
-       "\n\n"))))
+  (when-let (((bound-and-true-p flycheck-mode))
+             ((fboundp 'flycheck-overlay-errors-at))
+             (errors (flycheck-overlay-errors-at (point))))
+    (mapconcat
+     (lambda (err)
+       (let* ((buffer (current-buffer))
+              (beg (flycheck-error-pos err))
+              (end (when beg
+                     (save-excursion
+                       (goto-char beg)
+                       (if-let ((end-line (flycheck-error-end-line err))
+                                (end-col (flycheck-error-end-column err)))
+                           (progn
+                             (forward-line (- end-line (line-number-at-pos)))
+                             (move-to-column end-col)
+                             (point))
+                         beg))))
+              (type (flycheck-error-level err))
+              (text (flycheck-error-message err))
+              (line (flycheck-error-line err))
+              (col (flycheck-error-column err)))
+         (agent-shell--format-diagnostic
+          :buffer buffer
+          :beg beg
+          :end end
+          :line line
+          :col col
+          :type type
+          :text text)))
+     errors
+     "\n\n")))
 
 (defun agent-shell--get-error-context ()
   "Get error at point from either flymake or flycheck, whichever is available.
