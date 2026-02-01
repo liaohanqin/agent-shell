@@ -1003,7 +1003,7 @@ otherwise returns COMMAND unchanged."
                           (when-let* ((title (or (map-nested-elt state `(:tool-calls ,.toolCallId :title)) ""))
                                       (command (or (map-nested-elt update '(rawInput command))
                                                    (map-nested-elt state `(:tool-calls ,.toolCallId :command))))
-                                      (should-upgrade-title (not (string-match command title))))
+                                      (should-upgrade-title (not (string-match-p (regexp-quote command) title))))
                             (list (cons :title (concat command " " title))))
                           (when-let ((diff (agent-shell--make-diff-info :tool-call update)))
                             (list (cons :diff diff)))))
