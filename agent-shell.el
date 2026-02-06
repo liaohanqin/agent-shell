@@ -2839,10 +2839,15 @@ normalized server configs."
 Returns list of alists with :start, :end, and :path for each mention."
   (let ((mentions '())
         (pos 0))
-    (while (string-match "\\(?:^\\|[[:space:]]\\)@\\(?:\"\\([^\"]+\\)\"\\|\\([^[:space:]]+\\)\\)" prompt pos)
+    (while (string-match (rx (or line-start (not word))
+                             "@"
+                             (or (seq "\"" (group (+ (not "\""))) "\"")
+                                 (group (+ (not space)))))
+                         prompt pos)
       (push `((:start . ,(match-beginning 0))
               (:end . ,(match-end 0))
-              (:path . ,(or (match-string 1 prompt) (match-string 2 prompt))))
+              (:path . ,(when-let ((path (or (match-string 1 prompt) (match-string 2 prompt))))
+                          (substring-no-properties path))))
             mentions)
       (setq pos (match-end 0)))
     (nreverse mentions)))
