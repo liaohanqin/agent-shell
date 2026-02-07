@@ -3405,7 +3405,7 @@ For example:
                    map))
          (title (let* ((title (map-nested-elt request '(params toolCall title)))
                        (command (map-nested-elt request '(params toolCall rawInput command)))
-                       (command-first-line (when command
+                       (command-first-line (when (stringp command)
                                              (if (string-match "\n" command)
                                                  (concat (substring command 0 (match-beginning 0)) "...")
                                                command))))
@@ -3413,7 +3413,10 @@ For example:
                   ;; permission/tool call title, so it's hard to know
                   ;; what the permission is actually allowing.
                   ;; Display command if needed.
-                  (if (string-match-p (regexp-quote (or command "")) title)
+                  (if (and (stringp title)
+                           (stringp command)
+                           (not (string-empty-p command))
+                           (string-match-p (regexp-quote command) title))
                       title
                     (or command-first-line title))))
          (diff-button (when diff
