@@ -49,6 +49,7 @@
   (error "Please update 'shell-maker' to v0.84.9 or newer"))
 (require 'agent-shell-anthropic)
 (require 'agent-shell-auggie)
+(require 'agent-shell-codebuddy)
 (require 'agent-shell-completion)
 (require 'agent-shell-cursor)
 (require 'agent-shell-diff)
@@ -348,6 +349,7 @@ Returns an alist with all specified values."
 This function aggregates agents from OpenAI, Anthropic, Google,
 Goose, Cursor, Auggie, and others."
   (list (agent-shell-auggie-make-agent-config)
+        (agent-shell-codebuddy-make-agent-config)
         (agent-shell-anthropic-make-claude-code-config)
         (agent-shell-openai-make-codex-config)
         (agent-shell-cursor-make-agent-config)
@@ -379,6 +381,7 @@ configuration alist for backwards compatibility."
   :type '(choice (const :tag "None (prompt each time)" nil)
                  (const :tag "Auggie" auggie)
                  (const :tag "Claude Code" claude-code)
+                 (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Codex" codex)
                  (const :tag "Copilot" copilot)
                  (const :tag "Cursor" cursor)
@@ -1153,6 +1156,12 @@ otherwise returns COMMAND unchanged."
             :state state
             :request request))
           (t
+           (acp-send-response
+            :client (map-elt state :client)
+            :response (list (cons :request-id .id)
+                            (cons :error (acp-make-error
+                                          :code -32601
+                                          :message (format "Method not found: %s" .method)))))
            (agent-shell--update-fragment
             :state state
             :block-id "Unhandled Incoming Request"
