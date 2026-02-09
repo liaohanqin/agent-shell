@@ -564,7 +564,8 @@ FACE when non-nil applies the specified face to the text."
                            face ,face)
                          text))
   (add-text-properties 0 (length text)
-                       '(rear-nonsticky t)
+                       '(pointer hand
+                         rear-nonsticky t)
                        text)
   text)
 

@@ -137,7 +137,7 @@ The user is prompted to confirm or edit the worktree path before creation."
       (unless (file-exists-p worktree-path)
         (user-error "Failed to create worktree: %s" output))
       (let ((default-directory worktree-path))
-        (agent-shell t)))))
+        (agent-shell '(4))))))
 
 (provide 'agent-shell-worktree)
 

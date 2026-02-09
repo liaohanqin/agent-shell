@@ -4,10 +4,10 @@
 
 ;; Author: Alvaro Ramirez https://xenodium.com
 ;; URL: https://github.com/xenodium/agent-shell
-;; Version: 0.33.2
+;; Version: 0.34.2
 ;; Package-Requires: ((emacs "29.1") (shell-maker "0.84.9") (acp "0.9.1"))
 
-(defconst agent-shell--version "0.33.2")
+(defconst agent-shell--version "0.34.2")
 
 ;; This package is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -457,7 +457,7 @@ Example configuration with multiple servers:
 Lambdas can be used anywhere in the configuration hierarchy for dynamic
 evaluation at session startup time.  This is useful for values that
 depend on runtime context like the current working directory
-(`agent-shell-cwd').  Note: only lambdas are evaluated, not named
+\(`agent-shell-cwd').  Note: only lambdas are evaluated, not named
 functions, to avoid accidentally calling external symbols.
 
 For example, using the `claude-code-ide' package (see its documentation
@@ -520,7 +520,7 @@ HEARTBEAT, and AUTHENTICATE-REQUEST-MAKER."
 (defvar agent-shell--shell-maker-config nil)
 
 ;;;###autoload
-(defun agent-shell (&optional new-shell)
+(defun agent-shell (&optional arg)
   "Start or reuse an existing agent shell.
 
 `agent-shell' carries some DWIM (do what I mean) behaviour.
@@ -536,52 +536,83 @@ shell input.
 See `agent-shell-context-sources' on how to control DWIM
 behaviour.
 
-With prefix argument NEW-SHELL, force start a new shell."
-  (interactive "P")
-  (agent-shell--dwim :new-shell new-shell))
+With \\[universal-argument] prefix ARG, force start a new shell.
 
-(cl-defun agent-shell--dwim (&key config new-shell)
+With \\[universal-argument] \\[universal-argument] prefix ARG, prompt to pick an existing shell."
+  (interactive "P")
+  (cond
+   ((equal arg '(16))
+    (agent-shell--dwim :switch-to-shell t))
+   ((equal arg '(4))
+    (agent-shell--dwim :new-shell t))
+   (t
+    (agent-shell--dwim))))
+
+(cl-defun agent-shell--dwim (&key config new-shell switch-to-shell)
   "Start or reuse an agent shell with DWIM behavior.
 
 CONFIG is the agent configuration to use.
 NEW-SHELL when non-nil forces starting a new shell.
+SWITCH-TO-SHELL when non-nil prompts to pick an existing shell.
+
+NEW-SHELL and SWITCH-TO-SHELL are mutually exclusive.
 
 This function respects `agent-shell-prefer-viewport-interaction' and
 handles viewport mode detection, existing shell reuse, and project context."
+  (when (and new-shell switch-to-shell)
+    (error ":new-shell and :switch-to-shell are mutually exclusive"))
   (if agent-shell-prefer-viewport-interaction
       (if (and (not new-shell)
                (or (derived-mode-p 'agent-shell-viewport-view-mode)
                    (derived-mode-p 'agent-shell-viewport-edit-mode)))
           (agent-shell-toggle)
         (agent-shell-viewport--show-buffer
-         :shell-buffer (if new-shell
-                           (agent-shell--start :config (or config
-                                                           (agent-shell--resolve-preferred-config)
-                                                           (agent-shell-select-config
-                                                            :prompt "Start new agent: ")
-                                                           (error "No agent config found"))
-                                               :no-focus t
-                                               :new-session t)
-                         (agent-shell--shell-buffer))))
-    (if new-shell
-        (agent-shell-start :config (or config
-                                       (agent-shell--resolve-preferred-config)
-                                       (agent-shell-select-config
-                                        :prompt "Start new agent: ")
-                                       (error "No agent config found")))
-      (if (derived-mode-p 'agent-shell-mode)
-          (let* ((shell-buffer (agent-shell--shell-buffer :no-create t))
-                 (text (agent-shell--context :shell-buffer shell-buffer)))
-            (agent-shell-toggle)
-            (when text
-              (agent-shell--insert-to-shell-buffer :text text
-                                                   :shell-buffer shell-buffer)))
-        (let* ((shell-buffer (agent-shell--shell-buffer))
-               (text (agent-shell--context :shell-buffer shell-buffer)))
-          (agent-shell--display-buffer shell-buffer)
-          (when text
-            (agent-shell--insert-to-shell-buffer :text text
-                                                 :shell-buffer shell-buffer)))))))
+         :shell-buffer (cond (switch-to-shell
+                              (completing-read "Switch to shell: "
+                                               (mapcar #'buffer-name (or (agent-shell-buffers)
+                                                                         (user-error "No shells available")))
+                                               nil t))
+                             (new-shell
+                              (agent-shell--start :config (or config
+                                                              (agent-shell--resolve-preferred-config)
+                                                              (agent-shell-select-config
+                                                               :prompt "Start new agent: ")
+                                                              (error "No agent config found"))
+                                                  :no-focus t
+                                                  :new-session t))
+                             (t
+                              (agent-shell--shell-buffer)))))
+    (cond (switch-to-shell
+           (let* ((shell-buffer
+                   (completing-read "Switch to shell: "
+                                    (mapcar #'buffer-name (or (agent-shell-buffers)
+                                                              (user-error "No shells available")))
+                                    nil t))
+                  (text (agent-shell--context :shell-buffer shell-buffer)))
+             (agent-shell--display-buffer shell-buffer)
+             (when text
+               (agent-shell--insert-to-shell-buffer :text text
+                                                    :shell-buffer shell-buffer))))
+          (new-shell
+           (agent-shell-start :config (or config
+                                          (agent-shell--resolve-preferred-config)
+                                          (agent-shell-select-config
+                                           :prompt "Start new agent: ")
+                                          (error "No agent config found"))))
+          (t
+           (if (derived-mode-p 'agent-shell-mode)
+               (let* ((shell-buffer (agent-shell--shell-buffer :no-create t))
+                      (text (agent-shell--context :shell-buffer shell-buffer)))
+                 (agent-shell-toggle)
+                 (when text
+                   (agent-shell--insert-to-shell-buffer :text text
+                                                        :shell-buffer shell-buffer)))
+             (let* ((shell-buffer (agent-shell--shell-buffer))
+                    (text (agent-shell--context :shell-buffer shell-buffer)))
+               (agent-shell--display-buffer shell-buffer)
+               (when text
+                 (agent-shell--insert-to-shell-buffer :text text
+                                                      :shell-buffer shell-buffer))))))))
 
 ;;;###autoload
 (defun agent-shell-toggle ()
@@ -607,7 +638,7 @@ handles viewport mode detection, existing shell reuse, and project context."
 
 Always prompts for agent selection, even if existing shells are available."
   (interactive)
-  (agent-shell t))
+  (agent-shell '(4)))
 
 ;;;###autoload
 (defun agent-shell-prompt-compose ()
@@ -999,11 +1030,6 @@ otherwise returns COMMAND unchanged."
                                                 "bash"))
                                       (command (map-nested-elt update '(rawInput command))))
                             (list (cons :title command)))
-                          (when-let* ((title (or (map-nested-elt state `(:tool-calls ,.toolCallId :title)) ""))
-                                      (command (or (map-nested-elt update '(rawInput command))
-                                                   (map-nested-elt state `(:tool-calls ,.toolCallId :command))))
-                                      (should-upgrade-title (not (string-match-p (regexp-quote command) title))))
-                            (list (cons :title (concat command " " title))))
                           (when-let ((diff (agent-shell--make-diff-info :tool-call update)))
                             (list (cons :diff diff)))))
                  (let* ((diff (map-nested-elt state `(:tool-calls ,.toolCallId :diff)))
@@ -3347,16 +3373,29 @@ Always prompts for file selection, even if a current file is available."
   (interactive)
   (agent-shell-send-file t))
 
-(defun agent-shell-send-screenshot ()
+(defun agent-shell-send-screenshot (&optional pick-shell)
   "Capture a screenshot and insert it into `agent-shell'.
 
 The screenshot is saved to .agent-shell/screenshots in the project root.
-The captured screenshot file path is then inserted into the shell prompt."
+The captured screenshot file path is then inserted into the shell prompt.
+
+When PICK-SHELL is non-nil, prompt for which shell buffer to use."
   (interactive)
   (let* ((screenshots-dir (expand-file-name ".agent-shell/screenshots" (agent-shell-cwd)))
-         (screenshot-path (agent-shell--capture-screenshot :destination-dir screenshots-dir)))
+         (screenshot-path (agent-shell--capture-screenshot :destination-dir screenshots-dir))
+         (shell-buffer (when pick-shell
+                         (completing-read "Send screenshot to shell: "
+                                          (mapcar #'buffer-name (or (agent-shell-buffers)
+                                                                    (user-error "No shells available")))
+                                          nil t))))
     (agent-shell-insert
-     :text (agent-shell--get-files-context :files (list screenshot-path)))))
+     :text (agent-shell--get-files-context :files (list screenshot-path))
+     :shell-buffer shell-buffer)))
+
+(defun agent-shell-send-screenshot-to ()
+  "Like `agent-shell-send-screenshot' but prompt for which shell to use."
+  (interactive)
+  (agent-shell-send-screenshot t))
 
 ;;; Permissions
 
@@ -3829,6 +3868,8 @@ SUBMIT, when non-nil, submits the shell buffer after insertion.
 
 NO-FOCUS, when non-nil, avoid focusing shell on insertion.
 
+Use SHELL-BUFFER for insertion.
+
 When `agent-shell-prefer-viewport-interaction' is non-nil, prefer inserting
 into the viewport compose buffer instead of the shell buffer.  If no compose
 buffer exists, one will be created.
@@ -3844,22 +3885,48 @@ Returns an alist with insertion details or nil otherwise:
     (agent-shell--insert-to-shell-buffer :text text :submit submit
                                          :no-focus no-focus :shell-buffer shell-buffer)))
 
-(cl-defun agent-shell-send-region ()
-  "Send region to last accessed shell buffer in project."
-  (interactive)
-  (agent-shell-insert
-   :text (agent-shell--get-region-context
-          :deactivate t :no-error t
-          :agent-cwd (when-let ((shell-buffer (agent-shell--shell-buffer
-                                               :no-create t
-                                               :no-error t)))
-                       (with-current-buffer shell-buffer
-                         (agent-shell-cwd))))))
+(cl-defun agent-shell-send-region (&optional pick-shell)
+  "Send region to last accessed shell buffer in project.
 
-(cl-defun agent-shell-send-dwim ()
-  "Send region or error at point to last accessed shell buffer in project."
+When PICK-SHELL is non-nil, prompt for which shell buffer to use."
   (interactive)
-  (agent-shell-insert :text (agent-shell--context)))
+  (let ((shell-buffer (or (when pick-shell
+                            (completing-read "Send region to shell: "
+                                             (mapcar #'buffer-name (or (agent-shell-buffers)
+                                                                       (user-error "No shells available")))
+                                             nil t))
+                          (agent-shell--shell-buffer))))
+    (agent-shell-insert
+     :text (agent-shell--get-region-context
+            :deactivate t :no-error t
+            :agent-cwd (with-current-buffer shell-buffer
+                         (agent-shell-cwd)))
+     :shell-buffer shell-buffer)))
+
+(defun agent-shell-send-region-to ()
+  "Like `agent-shell-send-region' but prompt for which shell to use."
+  (interactive)
+  (agent-shell-send-region t))
+
+(cl-defun agent-shell-send-dwim (&optional arg)
+  "Send region or error at point to last accessed shell buffer in project.
+
+With \\[universal-argument] prefix ARG, force start a new shell.
+
+With \\[universal-argument] \\[universal-argument] prefix ARG, prompt to pick an existing shell."
+  (interactive "P")
+  (let ((shell-buffer
+         (cond
+          ((equal arg '(16))
+           (agent-shell--dwim :switch-to-shell t)
+           (agent-shell--shell-buffer))
+          ((equal arg '(4))
+           (agent-shell--dwim :new-shell t)
+           (agent-shell--shell-buffer))
+          (t
+           (agent-shell--shell-buffer)))))
+    (agent-shell-insert :text (agent-shell--context :shell-buffer shell-buffer)
+                        :shell-buffer shell-buffer)))
 
 (cl-defun agent-shell--get-region-context (&key deactivate no-error agent-cwd)
   "Get region as insertable text, ready for sending to agent.

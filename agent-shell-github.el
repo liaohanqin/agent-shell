@@ -94,15 +94,15 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
             message)))
 
 (defun agent-shell-github--ascii-art ()
-  "GitHub Copilot ASCII art."
+  "GitHub Copilot ASCII art matching the official CLI banner."
   (let* ((is-dark (eq (frame-parameter nil 'background-mode) 'dark))
          (text (string-trim "
-  ██████╗  ██████╗  ██████╗  ██╗ ██╗       ██████╗  ████████╗
- ██╔════╝ ██╔═══██╗ ██╔══██╗ ██║ ██║      ██╔═══██╗ ╚══██╔══╝
- ██║      ██║   ██║ ██████╔╝ ██║ ██║      ██║   ██║    ██║
- ██║      ██║   ██║ ██╔═══╝  ██║ ██║      ██║   ██║    ██║
- ╚██████╗ ╚██████╔╝ ██║      ██║ ███████╗ ╚██████╔╝    ██║
-  ╚═════╝  ╚═════╝  ╚═╝      ╚═╝ ╚══════╝  ╚═════╝     ╚═╝
+  █████┐ █████┐ █████┐ ██┐██┐     █████┐ ██████┐
+ ██┌───┘██┌──██┐██┌─██┐██│██│    ██┌──██┐└─██┌─┘
+ ██│    ██│  ██│█████┌┘██│██│    ██│  ██│  ██│
+ ██│    ██│  ██│██┌──┘ ██│██│    ██│  ██│  ██│
+ └█████┐└█████┌┘██│    ██│██████┐└█████┌┘  ██│
+  └────┘ └────┘ └─┘    └─┘└─────┘ └────┘   └─┘
 " "\n")))
     (propertize text 'font-lock-face (if is-dark
                                          '(:foreground "#6e40c9" :inherit fixed-pitch)

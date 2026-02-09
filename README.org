@@ -35,12 +35,16 @@ Watch on [[https://www.youtube.com/watch?v=R2Ucr3amgGg][YouTube]]
 
 * Related projects
 
-- [[https://github.com/xenodium/acp.el][acp.el]]: An ACP (Agent Client Protocol) implementation in Emacs lisp.
-- [[https://github.com/jethrokuan/agent-shell-manager][agent-shell-manager]]: Tabulated view and management of =agent-shell= buffers.
-- [[https://github.com/cmacrae/agent-shell-sidebar][agent-shell-sidebar]]: A sidebar add-on for =agent-shell=.
+=agent-shell= relies on [[https://github.com/xenodium/acp.el][acp.el]] to communicate with agents via ACP ([[https://agentclientprotocol.com/][Agent Client Protocol]]).
+
+We now have a handful of additional packages to extend the =agent-shell= experience:
+
 - [[https://github.com/nineluj/agent-review][agent-review]]: Code review interface for =agent-shell=.
 - [[https://github.com/ultronozm/agent-shell-attention.el][agent-shell-attention.el]]: Mode-line attention tracker for =agent-shell=.
+- [[https://github.com/jethrokuan/agent-shell-manager][agent-shell-manager]]: Tabulated view and management of =agent-shell= buffers.
+- [[https://github.com/cmacrae/agent-shell-sidebar][agent-shell-sidebar]]: A sidebar add-on for =agent-shell=.
 - [[https://github.com/ElleNajt/agent-shell-to-go][agent-shell-to-go]]: Interact with =agent-shell= sessions from your mobile or any other device via Slack.
+- [[https://github.com/ElleNajt/meta-agent-shell][meta-agent-shell]]: Multi-agent coordination system for =agent-shell= with inter-agent communication, task tracking, and project-level dispatching.
 
 * Icons
 
