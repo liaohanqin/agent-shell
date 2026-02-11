@@ -4538,6 +4538,7 @@ Mark model using CURRENT-MODEL-ID."
    ["Insert"
     ("!" "Shell command" agent-shell-insert-shell-command-output :transient t)
     ("@" "File" agent-shell-insert-file :transient t)
+    ("d" "Dwim" agent-shell-send-dwim :transient t)
     ]]
   [["Session"
     ("m" "Cycle modes" agent-shell-cycle-session-mode :transient t)
