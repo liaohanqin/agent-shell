@@ -561,6 +561,7 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-auggie-authentication             | Configuration for Auggie authentication.                                        |
 | agent-shell-auggie-command                    | Command and parameters for the Auggie client.                                   |
 | agent-shell-auggie-environment                | Environment variables for the Auggie client.                                    |
+| agent-shell-buffer-name-format                | Format to use when generating agent shell buffer names.                         |
 | agent-shell-completion-mode-hook              | Hook run after entering or leaving ‘agent-shell-completion-mode’.               |
 | agent-shell-container-command-runner          | Command prefix for executing commands in a container.                           |
 | agent-shell-context-sources                   | Sources to consider when determining M-x agent-shell automatic context.         |
@@ -593,6 +594,8 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-openai-codex-environment          | Environment variables for the OpenAI Codex client.                              |
 | agent-shell-opencode-authentication           | Configuration for OpenCode authentication.                                      |
 | agent-shell-opencode-command                  | Command and parameters for the OpenCode client.                                 |
+| agent-shell-opencode-default-model-id         | Default OpenCode model ID.                                                      |
+| agent-shell-opencode-default-session-mode-id  | Default OpenCode session mode ID.                                               |
 | agent-shell-opencode-environment              | Environment variables for the OpenCode client.                                  |
 | agent-shell-path-resolver-function            | Function for resolving remote paths on the local file-system, and vice versa.   |
 | agent-shell-permission-icon                   | Icon displayed when shell commands require permission to execute.               |
@@ -607,6 +610,8 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-section-functions                 | Abnormal hook run after overlays are applied (experimental).                    |
 | agent-shell-show-busy-indicator               | Non-nil to show the busy indicator animation in the header and mode line.       |
 | agent-shell-show-config-icons                 | Whether to show icons in agent config selection.                                |
+| agent-shell-show-context-usage-indicator      | Non-nil to show the context usage indicator in the header and mode line.        |
+| agent-shell-show-usage-at-turn-end            | Whether to display usage information when agent turn ends.                      |
 | agent-shell-show-welcome-message              | Non-nil to show welcome message.                                                |
 | agent-shell-text-file-capabilities            | Whether agents are initialized with read/write text file capabilities.          |
 | agent-shell-thought-process-expand-by-default | Whether thought process sections should be expanded by default.                 |
