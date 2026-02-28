@@ -57,6 +57,7 @@
 (require 'agent-shell-auggie)
 (require 'agent-shell-codebuddy)
 (require 'agent-shell-cline)
+(require 'agent-shell-codebuddy)
 (require 'agent-shell-completion)
 (require 'agent-shell-config)
 (require 'agent-shell-cursor)
@@ -575,6 +576,7 @@ Returns an alist with all specified values."
 This function aggregates agents from OpenAI, Anthropic, Google,
 Goose, Cursor, CodeBuddy, Auggie, and others."
   (list (agent-shell-auggie-make-agent-config)
+        (agent-shell-codebuddy-make-agent-config)
         (agent-shell-anthropic-make-claude-code-config)
         (agent-shell-codebuddy-make-agent-config)
         (agent-shell-cline-make-agent-config)
@@ -620,6 +622,7 @@ behavior explicitly."
                  (const :tag "Claude Code" claude-code)
                  (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Cline" cline)
+                 (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Codex" codex)
                  (const :tag "Copilot" copilot)
                  (const :tag "Cursor" cursor)
