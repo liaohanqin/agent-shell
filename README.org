@@ -43,6 +43,7 @@ We now have a handful of additional packages to extend the =agent-shell= experie
 - [[https://github.com/ultronozm/agent-shell-attention.el][agent-shell-attention.el]]: Mode-line attention tracker for =agent-shell=.
 - [[https://github.com/jethrokuan/agent-shell-manager][agent-shell-manager]]: Tabulated view and management of =agent-shell= buffers.
 - [[https://github.com/cmacrae/agent-shell-sidebar][agent-shell-sidebar]]: A sidebar add-on for =agent-shell=.
+- [[https://github.com/gveres/agent-shell-workspace][agent-shell-workspace]]: Dedicated tab-bar workspace for managing multiple =agent-shell= sessions.
 - [[https://github.com/ElleNajt/agent-shell-to-go][agent-shell-to-go]]: Interact with =agent-shell= sessions from your mobile or any other device via Slack.
 - [[https://github.com/ElleNajt/meta-agent-shell][meta-agent-shell]]: Multi-agent coordination system for =agent-shell= with inter-agent communication, task tracking, and project-level dispatching.
 - [[https://github.com/xenodium/emacs-skills][emacs-skills]]: Claude Code skills for Emacs.
