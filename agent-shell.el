@@ -804,19 +804,18 @@ OUTGOING-REQUEST-DECORATOR is an optional function passed through to
 
 (cl-defun agent-shell--config-icon (&key config)
   "Create icon string for CONFIG if available and icons are enabled.
-Returns an empty string if no icon should be displayed."
-  (if-let* ((graphics-capable (display-graphic-p))
-            (icon-filename (if (map-elt config :icon-name)
-                               (agent-shell--fetch-agent-icon
-                                (map-elt config :icon-name))
-                             (agent-shell--make-agent-fallback-icon
-                              (map-elt config :buffer-name) 100))))
-      (with-temp-buffer
-        (insert-image (create-image icon-filename nil nil
-                                    :ascent 'center
-                                    :height (frame-char-height)))
-        (buffer-string))
-    ""))
+Returns nil if no icon should be displayed."
+  (and-let* ((graphics-capable (display-graphic-p))
+             (icon-filename (if (map-elt config :icon-name)
+                                (agent-shell--fetch-agent-icon
+                                 (map-elt config :icon-name))
+                              (agent-shell--make-agent-fallback-icon
+                               (map-elt config :buffer-name) 100))))
+    (with-temp-buffer
+      (insert-image (create-image icon-filename nil nil
+                                  :ascent 'center
+                                  :height (frame-char-height)))
+      (buffer-string))))
 
 (cl-defun agent-shell-select-config (&key prompt)
   "Display PROMPT to select an agent config from `agent-shell-agent-configs'."
