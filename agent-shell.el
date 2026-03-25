@@ -127,7 +127,7 @@ When non-nil, tool use sections are expanded."
 (defvar agent-shell-mode-hook nil
   "Hook run after an `agent-shell-mode' buffer is fully initialized.
 Runs after the buffer-local state has been set up, so it is safe to
-call `agent-shell-subscribe-to' and access `agent-shell--state' here.")
+call `agent-shell-subscribe-to' from here.")
 
 (defvar agent-shell-permission-responder-function nil
   "When non-nil, a function called before showing the permission prompt.
