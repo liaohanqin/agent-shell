@@ -1918,7 +1918,20 @@ If the buffer's file has changed, prompt the user to reload it."
               ;; that's what `goto-line' recommends.
               (forward-line limit)
             (goto-char (point-max)))
-          (buffer-substring-no-properties start (point)))))))
+          ;; Sanitize: replace characters outside valid Unicode range
+          ;; (above U+10FFFF) with U+FFFD.  Such characters can arise
+          ;; from incorrect encoding detection (e.g. GBK files) and
+          ;; cause json-serialize to signal wrong-type-argument.
+          (let ((text (buffer-substring-no-properties start (point))))
+            (with-temp-buffer
+              (insert text)
+              (goto-char (point-min))
+              (while (not (eobp))
+                (if (> (char-after) 1114111)
+                    (progn (delete-char 1)
+                           (insert (string 65533)))
+                  (forward-char 1)))
+              (buffer-substring-no-properties (point-min) (point-max)))))))))
 
 (cl-defun agent-shell--on-fs-read-text-file-request (&key state acp-request)
   "Handle fs/read_text_file ACP-REQUEST with STATE."
