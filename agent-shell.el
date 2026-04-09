@@ -3642,6 +3642,7 @@ Session events:
     :data contains :request-id, :tool-call-id, :option-id, :cancelled
   `turn-complete'       - Agent turn finished and prompt ready for input
     :data contains :stop-reason and :usage
+  `input-submitted'     - User submitted input to the agent
 
 General events:
   `error'               - ACP request failed
@@ -3711,6 +3712,113 @@ DATA is an optional alist of event-specific data."
                 (eq (map-elt sub :event) event))
         (with-current-buffer (map-elt (agent-shell--state) :buffer)
           (funcall (map-elt sub :on-event) event-alist))))))
+
+(defun agent-shell--fire-delayed-event (shell-buffer on-event event-data)
+  "Fire ON-EVENT with EVENT-DATA in SHELL-BUFFER if it is still live."
+  (when (buffer-live-p shell-buffer)
+    (with-current-buffer shell-buffer
+      (funcall on-event event-data))))
+
+(cl-defun agent-shell-subscribe-with-delay (&key shell-buffer event delay
+                                                 cancel-on on-event)
+  "Subscribe to EVENT with a delayed ON-EVENT callback.
+
+Like `agent-shell-subscribe-to', but ON-EVENT fires DELAY seconds
+after EVENT rather than immediately.  If EVENT fires again before
+the timer expires, the timer restarts.
+
+CANCEL-ON is a list of event symbols that cancel the pending timer
+without firing ON-EVENT.
+
+Return a function that cancels any pending timer and drops
+subscriptions.
+
+Example:
+
+  (agent-shell-subscribe-with-delay
+   :shell-buffer buffer
+   :event \\='permission-request
+   :delay 30
+   :cancel-on \\='(permission-response tool-call-update
+                input-submitted clean-up)
+   :on-event (lambda (event)
+               (let ((title (or (map-nested-elt event '(:data :tool-call :title))
+                                \"Permission needed\")))
+                 (start-process \"notify\" nil \"notify-send\"
+                                \"Agent Shell\" title))))"
+  (unless shell-buffer
+    (error "Missing required argument: :shell-buffer"))
+  (unless event
+    (error "Missing required argument: :event"))
+  (unless delay
+    (error "Missing required argument: :delay"))
+  (unless on-event
+    (error "Missing required argument: :on-event"))
+  (let (timer tokens)
+    (push (agent-shell-subscribe-to
+           :shell-buffer shell-buffer
+           :event event
+           :on-event (lambda (event-data)
+                       (when (timerp timer) (cancel-timer timer))
+                       (setq timer
+                             (run-at-time delay nil
+                                          #'agent-shell--fire-delayed-event
+                                          shell-buffer on-event event-data))))
+          tokens)
+    (dolist (e cancel-on)
+      (push (agent-shell-subscribe-to
+             :shell-buffer shell-buffer
+             :event e
+             :on-event (lambda (_event)
+                         (when (timerp timer) (cancel-timer timer))
+                         (setq timer nil)))
+            tokens))
+    (lambda ()
+      (when (timerp timer) (cancel-timer timer))
+      (setq timer nil)
+      (dolist (token tokens)
+        (agent-shell-unsubscribe :subscription token)))))
+
+(cl-defun agent-shell-notify (&key shell-buffer event delay
+                                                      on-event)
+  "Subscribe to EVENT in SHELL-BUFFER and fire ON-EVENT after DELAY seconds.
+
+Like `agent-shell-subscribe-with-delay', but automatically cancels
+the pending notification when activity resumes, based on EVENT:
+
+  `permission-request' cancels on `permission-response',
+    `tool-call-update', `input-submitted', and `clean-up'.
+
+  `turn-complete' cancels on `tool-call-update', `input-submitted',
+    and `clean-up'.
+
+Return a function that cancels any pending timer and drops
+subscriptions.
+
+Intended for use from `agent-shell-mode-hook'.  For example:
+
+  (add-hook
+   \\='agent-shell-mode-hook
+   (lambda ()
+     (agent-shell-notify
+      :shell-buffer (current-buffer)
+      :event \\='permission-request
+      :delay 30
+      :on-event (lambda (event)
+                  (let ((title (or (map-nested-elt event '(:data :tool-call :title))
+                                   \"Permission needed\")))
+                    (start-process \"notify\" nil \"notify-send\"
+                                   \"Agent Shell\" title))))))"
+  (agent-shell-subscribe-with-delay
+   :shell-buffer shell-buffer
+   :event event
+   :delay delay
+   :cancel-on (pcase event
+                ('permission-request '(permission-response tool-call-update
+                                       input-submitted clean-up))
+                ('turn-complete '(tool-call-update input-submitted clean-up))
+                (_ (error "Unsupported event for notification: %s" event)))
+   :on-event on-event))
 
 ;;; Initialization
 
@@ -4707,6 +4815,8 @@ If FILE-PATH is not an image, returns nil."
     (when agent-shell-show-busy-indicator
       (agent-shell-heartbeat-start
        :heartbeat (map-elt agent-shell--state :heartbeat)))
+
+    (agent-shell--emit-event :event 'input-submitted)
 
     (map-put! agent-shell--state :last-entry-type nil)
 
