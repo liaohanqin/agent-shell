@@ -4930,6 +4930,98 @@ Returns a buffer object or nil."
                                          (current-buffer)))
                                 (agent-shell-buffers))))))
 
+;;;###autoload
+(cl-defun agent-shell-shell-buffer (&key viewport-buffer no-error no-create)
+  "Return an agent-shell buffer for the current context.
+
+A stable public API wrapping the internal resolver, intended for
+packages that integrate with agent-shell programmatically.
+
+Resolution order: viewport → current buffer → project buffers → prompt user.
+
+Example:
+  (agent-shell-shell-buffer)           ;; most recently used shell
+  (agent-shell-shell-buffer :no-error t) ;; nil instead of error when none found"
+  (agent-shell--shell-buffer :viewport-buffer viewport-buffer
+                              :no-error no-error
+                              :no-create no-create))
+
+(defun agent-shell--extract-last-response (buf start-pos)
+  "Extract plain-text agent response from BUF added after START-POS.
+
+Strips the echoed input and <shell-maker-end-of-prompt> separator,
+then strips the trailing shell prompt, returning only the response text.
+
+Example:
+  start-pos points to position before query was inserted
+  → returns \"Paris\" from a \"What is the capital of France?\" query"
+  (with-current-buffer buf
+    (let ((raw (buffer-substring-no-properties start-pos (point-max)))
+          (prompt-re (map-elt (agent-shell-get-config buf) :shell-prompt-regexp)))
+      (string-trim
+       (if (string-match (regexp-quote "<shell-maker-end-of-prompt>") raw)
+           (let ((after (substring raw (match-end 0))))
+             (if (and prompt-re (string-match (concat prompt-re ".*\\'") after))
+                 (substring after 0 (match-beginning 0))
+               after))
+         raw)))))
+
+(cl-defun agent-shell-query (&key text shell-buffer on-complete on-error timeout)
+  "Send TEXT to SHELL-BUFFER and call ON-COMPLETE with the response string.
+
+ON-COMPLETE is called with the plain-text response string.
+ON-ERROR is called with an error message string.
+TIMEOUT is seconds to wait before giving up (default: 60).
+SHELL-BUFFER defaults to the most recently used agent-shell buffer.
+
+Returns a cancel function — call it with no args to abort the in-flight
+query and clean up all subscriptions.
+
+Example:
+  (agent-shell-query
+   :text \"What is 2+2?\"
+   :on-complete (lambda (response) (message \"Got: %s\" response))
+   :on-error    (lambda (msg)      (message \"Error: %s\" msg)))"
+  (let* ((buf (or shell-buffer (agent-shell-shell-buffer)))
+         (timeout (or timeout 60))
+         (start (with-current-buffer buf (point-max)))
+         (tokens nil)
+         (timer nil)
+         (cancel (lambda ()
+                   (when timer (cancel-timer timer))
+                   (with-current-buffer buf
+                     (dolist (tok tokens)
+                       (agent-shell-unsubscribe :subscription tok))))))
+    (setq timer
+          (run-at-time timeout nil
+                       (lambda ()
+                         (funcall cancel)
+                         (when on-error
+                           (funcall on-error
+                                    (format "agent-shell-query: timed out after %ds"
+                                            timeout))))))
+    (push (agent-shell-subscribe-to
+           :shell-buffer buf
+           :event 'turn-complete
+           :on-event (lambda (_data)
+                       (let ((response (agent-shell--extract-last-response buf start)))
+                         (funcall cancel)
+                         (when on-complete (funcall on-complete response)))))
+          tokens)
+    (push (agent-shell-subscribe-to
+           :shell-buffer buf
+           :event 'error
+           :on-event (lambda (data)
+                       (funcall cancel)
+                       (when on-error
+                         (funcall on-error
+                                  (format "[%s] %s"
+                                          (map-elt data :code)
+                                          (map-elt data :message))))))
+          tokens)
+    (agent-shell-insert :text text :submit t :no-focus t :shell-buffer buf)
+    cancel))
+
 (defun agent-shell--input ()
   "Return shell input (not yet submitted)."
   (when-let* ((shell-buffer (agent-shell--shell-buffer))
