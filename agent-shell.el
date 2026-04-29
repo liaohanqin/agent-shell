@@ -5551,6 +5551,13 @@ MESSAGE-TEXT: Optional message to display after sending the response."
     ;; Note: Tool call data is no longer deleted here intentionally.
     ;; Subsequent tool_call_update notifications still need the data.
     ;; It gets cleared at end of turn with all tool calls.
+    ;;
+    ;; Do clear :permission-request-id so consumers can distinguish
+    ;; between a pending permission request and one already answered.
+    (when-let ((tool-calls (map-elt state :tool-calls))
+               (tool-call (map-elt tool-calls tool-call-id)))
+      (map-put! tool-calls tool-call-id
+                (map-delete tool-call :permission-request-id)))
     (agent-shell--cancel-idle-timer)
     (agent-shell--emit-event
      :event 'permission-response
