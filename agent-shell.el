@@ -723,7 +723,8 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :set-session-mode nil)
         (cons :session (list (cons :id nil)
                              (cons :mode-id nil)
-                             (cons :modes nil)))
+                             (cons :modes nil)
+                             (cons :title nil)))
         (cons :last-entry-type nil)
         (cons :chunked-group-count 0)
         (cons :request-count 0)
@@ -2803,7 +2804,7 @@ variable (see makunbound)"))
       ;; `agent-shell--handle'.  Fire mode hook so initial
       ;; state is available to agent-shell-mode-hook(s).
       (run-hooks 'agent-shell-mode-hook)
-      ;; Refresh the session topic from the agent. `init-finished' fires
+      ;; Refresh the session title from the agent. `init-finished' fires
       ;; once the session is established (covers resumed sessions whose
       ;; title is already known) and `turn-complete' covers ongoing
       ;; refinement for agents that summarize as the conversation grows.
@@ -2812,11 +2813,11 @@ variable (see makunbound)"))
       (agent-shell-subscribe-to
        :shell-buffer shell-buffer
        :event 'init-finished
-       :on-event #'agent-shell--refresh-topic-from-session-list)
+       :on-event #'agent-shell--refresh-session-title)
       (agent-shell-subscribe-to
        :shell-buffer shell-buffer
        :event 'turn-complete
-       :on-event #'agent-shell--refresh-topic-from-session-list)
+       :on-event #'agent-shell--refresh-session-title)
       ;; Subscribe to session selection events (needed regardless of focus).
       (when (eq agent-shell-session-strategy 'prompt)
         (agent-shell-subscribe-to
@@ -3682,20 +3683,20 @@ Initialization events (emitted in order):
   `prompt-ready'        - Shell prompt displayed and ready for input
 
 Session events:
-  `tool-call-update'    - Tool call started or updated
+  `tool-call-update'      - Tool call started or updated
     :data contains :tool-call-id and :tool-call
-  `file-write'          - File written via fs/write_text_file
+  `file-write'            - File written via fs/write_text_file
     :data contains :path and :content
-  `permission-request'  - Permission prompt displayed to user
+  `permission-request'    - Permission prompt displayed to user
     :data contains :request-id, :tool-call-id, :tool-call
-  `permission-response' - Permission response sent
+  `permission-response'   - Permission response sent
     :data contains :request-id, :tool-call-id, :option-id, :cancelled
-  `turn-complete'       - Agent turn finished and prompt ready for input
+  `turn-complete'         - Agent turn finished and prompt ready for input
     :data contains :stop-reason and :usage
-  `topic-changed'       - Session topic updated (first prompt or refined title)
-    :data contains :topic
-  `input-submitted'     - User submitted input to the agent
-  `idle'                - Agent idle for `agent-shell-idle-timeout' seconds
+  `session-title-changed' - Session title updated
+    :data contains :title
+  `input-submitted'       - User submitted input to the agent
+  `idle'                  - Agent idle for `agent-shell-idle-timeout' seconds
     :data contains :idle-event and :buffer
 
 General events:
@@ -4807,42 +4808,37 @@ If FILE-PATH is not an image, returns nil."
                     "\n")
    :create-new t))
 
-(defun agent-shell--set-topic (topic)
-  "Set the current session's topic to TOPIC and emit `topic-changed'.
-Does nothing if TOPIC is empty or matches the current value.
-Rebuilds the session alist (rather than `map-put!') because :topic
-may be a new key not yet present in the alist."
-  (when (and (stringp topic) (not (string-empty-p topic)))
-    (when-let ((session (map-elt agent-shell--state :session)))
-      (unless (equal (map-elt session :topic) topic)
-        (map-put! agent-shell--state :session
-                  (cons (cons :topic topic)
-                        (assq-delete-all :topic session)))
-        (agent-shell--emit-event :event 'topic-changed
-                                 :data `(:topic ,topic))))))
+(defun agent-shell--set-session-title (title)
+  "Set the current session's title to TITLE and emit `session-title-changed'.
+Does nothing if TITLE is empty or matches the current value."
+  (when (and (stringp title)
+             (not (string-empty-p title))
+             (not (equal (map-nested-elt agent-shell--state '(:session :title)) title)))
+    (map-put! (map-elt agent-shell--state :session) :title title)
+    (agent-shell--emit-event :event 'session-title-changed
+                             :data (list (cons :title title)))))
 
-(defun agent-shell--refresh-topic-from-session-list (&optional _event)
-  "Refresh `(:session :topic)' from the agent's session/list metadata.
+(defun agent-shell--refresh-session-title (&optional _event)
+  "Refresh `(:session :title)' by fetching from agent.
+
 Sends a `session/list' ACP request and writes any non-empty `title'
-field on the matching session via `agent-shell--set-topic'.  Agents
+field on the matching session via `agent-shell--set-session-title'.  Agents
 that don't supply a title (e.g. Claude Code) are no-ops; the seeded
-first-prompt topic is left in place."
+first-prompt title is left in place."
   (when-let* ((client (map-elt agent-shell--state :client))
-              (session-id (map-nested-elt agent-shell--state '(:session :id)))
-              (cwd (agent-shell--resolve-path default-directory)))
+              (session-id (map-nested-elt agent-shell--state '(:session :id))))
     (acp-send-request
      :client client
-     :request (acp-make-session-list-request :cwd cwd)
+     :request (acp-make-session-list-request
+               :cwd (agent-shell--resolve-path default-directory))
      :buffer (current-buffer)
      :on-success
-     (lambda (resp)
-       (when-let* ((sessions (append (or (map-elt resp 'sessions) '()) nil))
-                   (current (seq-find
-                             (lambda (s) (equal (map-elt s 'sessionId) session-id))
-                             sessions))
-                   (title (map-elt current 'title)))
-         (agent-shell--set-topic title)))
-     :on-failure (lambda (&rest _) nil))))
+     (lambda (acp-response)
+       (when-let ((acp-session (seq-find
+                               (lambda (acp-session)
+                                 (equal (map-elt acp-session 'sessionId) session-id))
+                               (append (or (map-elt acp-response 'sessions) '()) nil))))
+         (agent-shell--set-session-title (map-elt acp-session 'title)))))))
 
 (cl-defun agent-shell--send-command (&key prompt shell-buffer)
   "Send PROMPT to agent using SHELL-BUFFER."
@@ -4862,11 +4858,11 @@ first-prompt topic is left in place."
 
     (map-put! agent-shell--state :last-entry-type nil)
 
-    ;; Seed the session topic with the first user prompt so consumers
+    ;; Seed the session title with the first user prompt so consumers
     ;; (e.g. agent-shell-manager) have something to display before any
     ;; agent-supplied title arrives.
-    (unless (map-nested-elt agent-shell--state '(:session :topic))
-      (agent-shell--set-topic (substring-no-properties prompt)))
+    (unless (map-nested-elt agent-shell--state '(:session :title))
+      (agent-shell--set-session-title (substring-no-properties prompt)))
 
     (agent-shell--append-transcript
      :text (format "## User (%s)\n\n%s\n\n"
