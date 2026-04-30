@@ -983,11 +983,11 @@ Works from both shell and viewport buffers."
     (kill-buffer shell-buffer)
     (let* ((default-directory (buffer-local-value 'default-directory shell-buffer))
            (new-shell-buffer (agent-shell--start
-                             :config config
-                             :session-strategy strategy
-                             :session-id session-id
-                             :new-session t
-                             :no-focus t)))
+                              :config config
+                              :session-strategy strategy
+                              :session-id session-id
+                              :new-session t
+                              :no-focus t)))
       (shell-maker-set-buffer-name new-shell-buffer shell-buffer-name)
       (if (or from-viewport agent-shell-prefer-viewport-interaction)
           (agent-shell-viewport--show-buffer
@@ -2547,14 +2547,14 @@ Returns propertized labels in :status and :title propertized."
   (when-let ((tool-call (map-nested-elt state `(:tool-calls ,tool-call-id))))
     (let* ((title (when-let ((text (agent-shell--shorten-paths
                                     (map-elt tool-call :title)))
-                            ;; Execute commands go to body instead; use description as title.
-                            ((not (equal (map-elt tool-call :kind) "execute"))))
+                             ;; Execute commands go to body instead; use description as title.
+                             ((not (equal (map-elt tool-call :kind) "execute"))))
                     ;; Strip kind prefix from title to avoid
                     ;; redundancy "[read] Read file.el" becomes
                     ;; "[read] file.el"
                     (if (and (map-elt tool-call :kind)
                              (string-match-p (concat "\\`" (regexp-quote
-                                                           (map-elt tool-call :kind)) " ")
+                                                            (map-elt tool-call :kind)) " ")
                                              (downcase text)))
                         (string-trim-left (substring text (length (map-elt tool-call :kind))))
                       text)))
@@ -2655,16 +2655,16 @@ PROPERTIES should be a plist of property-value pairs."
 (defun agent-shell--format-buffer-name (agent-name project-name)
   "Format `agent-shell' buffer name using AGENT-NAME and PROJECT-NAME."
   (pcase agent-shell-buffer-name-format
-        ((pred functionp)
-         (funcall agent-shell-buffer-name-format agent-name project-name))
-        ('kebab-case
-         (format "%s-agent @ %s"
-                 (downcase (replace-regexp-in-string " " "-" agent-name))
-                 project-name))
-        ('default
-         (format "%s Agent @ %s"
-                 agent-name
-                 project-name))))
+    ((pred functionp)
+     (funcall agent-shell-buffer-name-format agent-name project-name))
+    ('kebab-case
+     (format "%s-agent @ %s"
+             (downcase (replace-regexp-in-string " " "-" agent-name))
+             project-name))
+    ('default
+     (format "%s Agent @ %s"
+             agent-name
+             project-name))))
 
 (cl-defun agent-shell--apply (&key function alist)
   "Apply keyword ALIST to FUNCTION.
@@ -4079,38 +4079,38 @@ Must provide ON-SESSION-INIT (lambda ())."
         (agent-shell--initiate-new-session
          :shell-buffer shell-buffer
          :on-session-init on-session-init))
-  ;; User requested resuming session with explicit session ID.
-  (if-let ((resume-session-id (map-elt (agent-shell--state) :resume-session-id)))
-      (if (or (map-elt (agent-shell--state) :supports-session-load)
-              (map-elt (agent-shell--state) :supports-session-resume))
-          ;; Agent supports some form of resuming.
-          (progn
-            (agent-shell--emit-event
-             :event 'session-selected
-             :data (list (cons :session-id resume-session-id)))
-            (agent-shell--initiate-session-resume-by-id
-             :session-id resume-session-id
-             :shell-buffer shell-buffer
-             :on-session-init on-session-init))
-        ;; Resuming not supported. Start a new session.
-        (message "Resuming unsupported by agent. Starting new session.")
-        (agent-shell--emit-event :event 'session-selected)
-        (agent-shell--initiate-new-session
-         :shell-buffer shell-buffer
-         :on-session-init on-session-init))
-    ;; Resuming, but must request session list first.
-    (if (and (map-elt (agent-shell--state) :supports-session-list)
-             (or (map-elt (agent-shell--state) :supports-session-load)
-                 (map-elt (agent-shell--state) :supports-session-resume))
-             (not (memq agent-shell-session-strategy '(new-deferred new))))
-        (agent-shell--initiate-session-list-and-load
-         :shell-buffer shell-buffer
-         :on-session-init on-session-init)
-      (progn
-        (agent-shell--emit-event :event 'session-selected)
-        (agent-shell--initiate-new-session
-         :shell-buffer shell-buffer
-         :on-session-init on-session-init))))))
+    ;; User requested resuming session with explicit session ID.
+    (if-let ((resume-session-id (map-elt (agent-shell--state) :resume-session-id)))
+        (if (or (map-elt (agent-shell--state) :supports-session-load)
+                (map-elt (agent-shell--state) :supports-session-resume))
+            ;; Agent supports some form of resuming.
+            (progn
+              (agent-shell--emit-event
+               :event 'session-selected
+               :data (list (cons :session-id resume-session-id)))
+              (agent-shell--initiate-session-resume-by-id
+               :session-id resume-session-id
+               :shell-buffer shell-buffer
+               :on-session-init on-session-init))
+          ;; Resuming not supported. Start a new session.
+          (message "Resuming unsupported by agent. Starting new session.")
+          (agent-shell--emit-event :event 'session-selected)
+          (agent-shell--initiate-new-session
+           :shell-buffer shell-buffer
+           :on-session-init on-session-init))
+      ;; Resuming, but must request session list first.
+      (if (and (map-elt (agent-shell--state) :supports-session-list)
+               (or (map-elt (agent-shell--state) :supports-session-load)
+                   (map-elt (agent-shell--state) :supports-session-resume))
+               (not (memq agent-shell-session-strategy '(new-deferred new))))
+          (agent-shell--initiate-session-list-and-load
+           :shell-buffer shell-buffer
+           :on-session-init on-session-init)
+        (progn
+          (agent-shell--emit-event :event 'session-selected)
+          (agent-shell--initiate-new-session
+           :shell-buffer shell-buffer
+           :on-session-init on-session-init))))))
 
 (defun agent-shell--sort-sessions-by-recency (acp-sessions)
   "Return ACP-SESSIONS sorted by recency, newest first.
@@ -4238,25 +4238,25 @@ Falls back to latest session in batch mode (e.g. tests)."
     (if noninteractive
         (car acp-sessions)
       (let* ((other-shells (seq-remove (lambda (b) (eq b (current-buffer)))
-                                      (agent-shell-buffers)))
+                                       (agent-shell-buffers)))
              (new-session-choice "Start new shell")
              (columns (agent-shell--session-selection-columns))
              (max-widths (when acp-sessions
-                          (mapcar (lambda (col)
-                                    (cons col (apply #'max
-                                                     (mapcar (lambda (s)
-                                                               (length (agent-shell--session-column-value col s)))
-                                                             acp-sessions))))
-                                  columns)))
+                           (mapcar (lambda (col)
+                                     (cons col (apply #'max
+                                                      (mapcar (lambda (s)
+                                                                (length (agent-shell--session-column-value col s)))
+                                                              acp-sessions))))
+                                   columns)))
              (session-choices (append (list (cons new-session-choice nil))
-                              (when other-shells
-                                (list (cons "Open existing shell" :other-shell)))
-                              (mapcar (lambda (acp-session)
-                                        (cons (agent-shell--session-choice-label
-                                               :acp-session acp-session
-                                               :max-widths max-widths)
-                                              acp-session))
-                                      acp-sessions)))
+                                      (when other-shells
+                                        (list (cons "Open existing shell" :other-shell)))
+                                      (mapcar (lambda (acp-session)
+                                                (cons (agent-shell--session-choice-label
+                                                       :acp-session acp-session
+                                                       :max-widths max-widths)
+                                                      acp-session))
+                                              acp-sessions)))
              (candidates (mapcar #'car session-choices))
              ;; Some completion frameworks yielded appended (nil) to each line
              ;; unless this-command was bound.
@@ -4305,7 +4305,7 @@ Falls back to latest session in batch mode (e.g. tests)."
                                                      (:name . ,(map-elt model 'name))
                                                      (:description . ,(map-elt model 'description))))
                                                  (map-nested-elt acp-response '(models availableModels))))
-                          (cons :title (map-nested-elt agent-shell--state '(:session :title))))))
+                           (cons :title (map-nested-elt agent-shell--state '(:session :title))))))
 
 (cl-defun agent-shell--finalize-session-init (&key on-session-init)
   "Finalize session initialization and invoke ON-SESSION-INIT."
@@ -4518,64 +4518,64 @@ SESSION-TITLE is an optional display title for the resumed session."
                                              agent-shell-session-strategy)
                                     nil))))
                          (unless (eq acp-session :other-shell)
-                         (let ((acp-session-id (and acp-session
-                                                    (map-elt acp-session 'sessionId))))
-                         (agent-shell--emit-event
-                          :event 'session-selected
-                          :data (list (cons :session-id acp-session-id)))
-                         (if acp-session-id
-                             (progn
-                               (agent-shell--update-fragment
-                                :state (agent-shell--state)
-                                :namespace-id "bootstrapping"
-                                :block-id "starting"
-                                :body (format "\n\nLoading session %s..." acp-session-id)
-                                :append t)
-                               (agent-shell--send-request
-                                :state (agent-shell--state)
-                                :client (map-elt (agent-shell--state) :client)
-                                :request (let ((cwd (agent-shell--resolve-path (agent-shell-cwd)))
-                                               (mcp-servers (agent-shell--mcp-servers)))
-                                           (let ((use-resume (if agent-shell-prefer-session-resume
-                                                                  (map-elt (agent-shell--state) :supports-session-resume)
-                                                                (not (map-elt (agent-shell--state) :supports-session-load)))))
-                                             (if use-resume
-                                                 (acp-make-session-resume-request
-                                                  :session-id acp-session-id
-                                                  :cwd cwd
-                                                  :mcp-servers mcp-servers)
-                                               (acp-make-session-load-request
-                                                :session-id acp-session-id
-                                                :cwd cwd
-                                                :mcp-servers mcp-servers))))
-                                :buffer (current-buffer)
-                                :on-success (lambda (acp-load-response)
-                                              (agent-shell--set-session-from-response
-                                               :acp-response acp-load-response
-                                               :acp-session-id acp-session-id)
-                                              (agent-shell--update-fragment
-                                               :state (agent-shell--state)
-                                               :namespace-id "bootstrapping"
-                                               :block-id "resumed_session"
-                                               :label-left (format "%s %s"
-                                                                   (agent-shell--make-status-kind-label :status "completed")
-                                                                   (propertize "Resuming session" 'font-lock-face 'font-lock-doc-markup-face))
-                                               :expanded t
-                                               :body (or (map-elt acp-session 'title) ""))
-                                              (agent-shell--finalize-session-init :on-session-init on-session-init))
-                                :on-failure (lambda (_acp-error _raw-message)
-                                              (agent-shell--update-fragment
-                                               :state (agent-shell--state)
-                                               :namespace-id "bootstrapping"
-                                               :block-id "starting"
-                                               :body "\n\nCould not load existing session. Creating a new one..."
-                                               :append t)
-                                              (agent-shell--initiate-new-session
-                                               :shell-buffer shell-buffer
-                                               :on-session-init on-session-init))))
-                           (agent-shell--initiate-new-session
-                            :shell-buffer shell-buffer
-                            :on-session-init on-session-init)))))
+                           (let ((acp-session-id (and acp-session
+                                                      (map-elt acp-session 'sessionId))))
+                             (agent-shell--emit-event
+                              :event 'session-selected
+                              :data (list (cons :session-id acp-session-id)))
+                             (if acp-session-id
+                                 (progn
+                                   (agent-shell--update-fragment
+                                    :state (agent-shell--state)
+                                    :namespace-id "bootstrapping"
+                                    :block-id "starting"
+                                    :body (format "\n\nLoading session %s..." acp-session-id)
+                                    :append t)
+                                   (agent-shell--send-request
+                                    :state (agent-shell--state)
+                                    :client (map-elt (agent-shell--state) :client)
+                                    :request (let ((cwd (agent-shell--resolve-path (agent-shell-cwd)))
+                                                   (mcp-servers (agent-shell--mcp-servers)))
+                                               (let ((use-resume (if agent-shell-prefer-session-resume
+                                                                     (map-elt (agent-shell--state) :supports-session-resume)
+                                                                   (not (map-elt (agent-shell--state) :supports-session-load)))))
+                                                 (if use-resume
+                                                     (acp-make-session-resume-request
+                                                      :session-id acp-session-id
+                                                      :cwd cwd
+                                                      :mcp-servers mcp-servers)
+                                                   (acp-make-session-load-request
+                                                    :session-id acp-session-id
+                                                    :cwd cwd
+                                                    :mcp-servers mcp-servers))))
+                                    :buffer (current-buffer)
+                                    :on-success (lambda (acp-load-response)
+                                                  (agent-shell--set-session-from-response
+                                                   :acp-response acp-load-response
+                                                   :acp-session-id acp-session-id)
+                                                  (agent-shell--update-fragment
+                                                   :state (agent-shell--state)
+                                                   :namespace-id "bootstrapping"
+                                                   :block-id "resumed_session"
+                                                   :label-left (format "%s %s"
+                                                                       (agent-shell--make-status-kind-label :status "completed")
+                                                                       (propertize "Resuming session" 'font-lock-face 'font-lock-doc-markup-face))
+                                                   :expanded t
+                                                   :body (or (map-elt acp-session 'title) ""))
+                                                  (agent-shell--finalize-session-init :on-session-init on-session-init))
+                                    :on-failure (lambda (_acp-error _raw-message)
+                                                  (agent-shell--update-fragment
+                                                   :state (agent-shell--state)
+                                                   :namespace-id "bootstrapping"
+                                                   :block-id "starting"
+                                                   :body "\n\nCould not load existing session. Creating a new one..."
+                                                   :append t)
+                                                  (agent-shell--initiate-new-session
+                                                   :shell-buffer shell-buffer
+                                                   :on-session-init on-session-init))))
+                               (agent-shell--initiate-new-session
+                                :shell-buffer shell-buffer
+                                :on-session-init on-session-init)))))
                      (quit
                       (agent-shell--emit-event :event 'session-selection-cancelled)))))
    :on-failure (lambda (_acp-error _raw-message)
@@ -4838,9 +4838,9 @@ first-prompt title is left in place."
      :on-success
      (lambda (acp-response)
        (when-let ((acp-session (seq-find
-                               (lambda (acp-session)
-                                 (equal (map-elt acp-session 'sessionId) session-id))
-                               (append (or (map-elt acp-response 'sessions) '()) nil))))
+                                (lambda (acp-session)
+                                  (equal (map-elt acp-session 'sessionId) session-id))
+                                (append (or (map-elt acp-response 'sessions) '()) nil))))
          (agent-shell--set-session-title (map-elt acp-session 'title)))))))
 
 (cl-defun agent-shell--send-command (&key prompt shell-buffer)
@@ -6827,25 +6827,25 @@ returns:
   offset: 10
   limit: 20\""
   (when-let* ((raw-input)
-            (excluded-keys '(command description plan))
-            (params (seq-remove
-                     (lambda (pair)
-                       (let ((key (car pair))
-                             (value (cdr pair)))
-                         (or (memq key excluded-keys)
-                             (null value)
-                             (and (stringp value) (string-empty-p value)))))
-                     raw-input)))
-  (mapconcat (lambda (pair)
-               (format "%s: %s"
-                       (symbol-name (car pair))
-                       (cond
-                        ((stringp (cdr pair)) (cdr pair))
-                        ((numberp (cdr pair)) (number-to-string (cdr pair)))
-                        ((eq (cdr pair) t) "true")
-                        (t (prin1-to-string (cdr pair))))))
-             params
-             "\n")))
+              (excluded-keys '(command description plan))
+              (params (seq-remove
+                       (lambda (pair)
+                         (let ((key (car pair))
+                               (value (cdr pair)))
+                           (or (memq key excluded-keys)
+                               (null value)
+                               (and (stringp value) (string-empty-p value)))))
+                       raw-input)))
+    (mapconcat (lambda (pair)
+                 (format "%s: %s"
+                         (symbol-name (car pair))
+                         (cond
+                          ((stringp (cdr pair)) (cdr pair))
+                          ((numberp (cdr pair)) (number-to-string (cdr pair)))
+                          ((eq (cdr pair) t) "true")
+                          (t (prin1-to-string (cdr pair))))))
+               params
+               "\n")))
 
 (defun agent-shell--longest-backtick-run (text)
   "Return the length of the longest consecutive backtick sequence in TEXT.
