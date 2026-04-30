@@ -3213,40 +3213,28 @@ A buffer-local hash table mapping cache keys to header strings.")
 (cl-defun agent-shell--make-header-model (state &key qualifier bindings)
   "Create a header model alist from STATE, QUALIFIER, and BINDINGS.
 The model contains all inputs needed to render the graphical header."
-  (let* ((model-name (or (map-elt (seq-find (lambda (model)
-                                              (string= (map-elt model :model-id)
-                                                       (map-nested-elt state '(:session :model-id))))
-                                            (map-nested-elt state '(:session :models)))
-                                  :name)
-                         (map-nested-elt state '(:session :model-id))))
-         (mode-id (map-nested-elt state '(:session :mode-id)))
-         (mode-name (when mode-id
-                      (or (agent-shell--resolve-session-mode-name
-                           mode-id
-                           (agent-shell--get-available-modes state))
-                          mode-id))))
-    `((:buffer-name . ,(map-nested-elt state '(:agent-config :buffer-name)))
-      (:icon-name . ,(map-nested-elt state '(:agent-config :icon-name)))
-      (:model-id . ,(map-nested-elt state '(:session :model-id)))
-      (:model-name . ,model-name)
-      (:mode-id . ,mode-id)
-      (:mode-name . ,mode-name)
-      (:project-name . ,(agent-shell--project-name))
-      (:session-id . ,(agent-shell--session-id-indicator))
-      (:frame-width . ,(frame-pixel-width))
-      (:font-height . ,(frame-char-height))
-      (:font-size . ,(if-let* (((display-graphic-p))
-                               (font (face-attribute 'default :font))
-                               ((fontp font))
-                               (size (font-get font :size))
-                               ((> size 0)))
-                         size
-                       (frame-char-height)))
-      (:background-mode . ,(frame-parameter nil 'background-mode))
-      (:context-indicator . ,(agent-shell--context-usage-indicator))
-      (:busy-indicator-frame . ,(agent-shell--busy-indicator-frame))
-      (:qualifier . ,qualifier)
-      (:bindings . ,bindings))))
+  `((:buffer-name . ,(map-nested-elt state '(:agent-config :buffer-name)))
+    (:icon-name . ,(map-nested-elt state '(:agent-config :icon-name)))
+    (:model-id . ,(map-nested-elt state '(:session :model-id)))
+    (:model-name . ,(agent-shell-get-model-name state))
+    (:mode-id . ,(map-nested-elt state '(:session :mode-id)))
+    (:mode-name . ,(agent-shell-get-mode-name state))
+    (:project-name . ,(agent-shell--project-name))
+    (:session-id . ,(agent-shell--session-id-indicator))
+    (:frame-width . ,(frame-pixel-width))
+    (:font-height . ,(frame-char-height))
+    (:font-size . ,(if-let* (((display-graphic-p))
+                             (font (face-attribute 'default :font))
+                             ((fontp font))
+                             (size (font-get font :size))
+                             ((> size 0)))
+                       size
+                     (frame-char-height)))
+    (:background-mode . ,(frame-parameter nil 'background-mode))
+    (:context-indicator . ,(agent-shell--context-usage-indicator))
+    (:busy-indicator-frame . ,(agent-shell--busy-indicator-frame))
+    (:qualifier . ,qualifier)
+    (:bindings . ,bindings)))
 
 (defun agent-shell--header-cache-key (model)
   "Generate a cache key from header MODEL.
@@ -6342,6 +6330,27 @@ See https://agentclientprotocol.com/protocol/session-modes for details."
                                (string= mode-id (map-elt m :id)))
                              available-session-modes)))
     (map-elt mode :name)))
+
+(defun agent-shell-get-model-name (state)
+  "Get the current model name from STATE.
+
+Returns the model name if available, otherwise returns nil."
+  (or (map-elt (seq-find (lambda (model)
+                           (string= (map-elt model :model-id)
+                                    (map-nested-elt state '(:session :model-id))))
+                         (map-nested-elt state '(:session :models)))
+               :name)
+      (map-nested-elt state '(:session :model-id))))
+
+(defun agent-shell-get-mode-name (state)
+  "Get the current session mode name from STATE.
+
+Returns the mode name if available, otherwise returns nil."
+  (when-let ((mode-id (map-nested-elt state '(:session :mode-id))))
+    (or (agent-shell--resolve-session-mode-name
+         mode-id
+         (agent-shell--get-available-modes state))
+        mode-id)))
 
 (defun agent-shell--busy-indicator-frame ()
   "Return busy frame string or nil if not busy."
