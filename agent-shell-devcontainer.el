@@ -25,8 +25,8 @@
 
 ;;; Code:
 
-(declare-function json-read-file "json" (filename))
-(declare-function map-elt "map" (map key &optional default testfn))
+(declare-function json-read-file "json")
+(declare-function map-elt "map")
 
 (declare-function agent-shell-cwd "agent-shell")
 
