@@ -651,7 +651,8 @@ QUOTED-TEXT is inserted as a block quote as part of the reply."
   (when (agent-shell-viewport--busy-p)
     (user-error "Busy, please wait"))
   (let ((region (map-elt (agent-shell--get-region :deactivate t) :content)))
-    (agent-shell-viewport--setup-reply :quoted-text (string-trim region)))
+    (agent-shell-viewport--setup-reply
+     :quoted-text (when region (string-trim region))))
   ;; Setting point isn't enough at times. Force scrolling.
   (set-window-start (selected-window) (point-min)))
 
