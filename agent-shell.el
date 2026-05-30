@@ -3046,26 +3046,28 @@ by default, RENDER-BODY-IMAGES to enable inline image rendering in body."
                     (padding-end (map-nested-elt range '(:padding :end)))
                     (block-start (map-nested-elt range '(:block :start)))
                     (block-end (map-nested-elt range '(:block :end))))
-          ;; Apply markdown overlay to body.
-          (save-restriction
-            (when-let ((body-start (map-nested-elt range '(:body :start)))
-                       (body-end (map-nested-elt range '(:body :end))))
-              (narrow-to-region body-start body-end)
-              (let ((markdown-overlays-highlight-blocks agent-shell-highlight-blocks)
-                    (markdown-overlays-render-images render-body-images))
-                (markdown-overlays-put))))
-          ;; Note: For now, we're skipping applying markdown overlays
-          ;; on left labels as they currently carry propertized text
-          ;; for statuses (ie. boxed).
-          ;;
-          ;; Apply markdown overlay to right label.
-          (save-restriction
-            (when-let ((label-right-start (map-nested-elt range '(:label-right :start)))
-                       (label-right-end (map-nested-elt range '(:label-right :end))))
-              (narrow-to-region label-right-start label-right-end)
-              (let ((markdown-overlays-highlight-blocks agent-shell-highlight-blocks)
-                    (markdown-overlays-render-images nil))
-                (markdown-overlays-put))))
+          ;; Restore point after narrowing to prevent scrolling
+          (save-excursion
+            ;; Apply markdown overlay to body.
+            (save-restriction
+              (when-let ((body-start (map-nested-elt range '(:body :start)))
+                         (body-end (map-nested-elt range '(:body :end))))
+                (narrow-to-region body-start body-end)
+                (let ((markdown-overlays-highlight-blocks agent-shell-highlight-blocks)
+                      (markdown-overlays-render-images render-body-images))
+                  (markdown-overlays-put))))
+            ;; Note: For now, we're skipping applying markdown overlays
+            ;; on left labels as they currently carry propertized text
+            ;; for statuses (ie. boxed).
+            ;;
+            ;; Apply markdown overlay to right label.
+            (save-restriction
+              (when-let ((label-right-start (map-nested-elt range '(:label-right :start)))
+                         (label-right-end (map-nested-elt range '(:label-right :end))))
+                (narrow-to-region label-right-start label-right-end)
+                (let ((markdown-overlays-highlight-blocks agent-shell-highlight-blocks)
+                      (markdown-overlays-render-images nil))
+                  (markdown-overlays-put)))))
           (when auto-scroll
             (goto-char (point-max)))))))
   (with-current-buffer (map-elt state :buffer)
