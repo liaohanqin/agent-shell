@@ -5449,12 +5449,32 @@ first-prompt title is left in place."
                                  (append (or (map-elt acp-response 'sessions) '()) nil))))
          (agent-shell--set-session-title (map-elt acp-session 'title)))))))
 
+(defun agent-shell--expand-truncated-regions (prompt)
+  "Expand truncated regions in PROMPT marked with `agent-shell-region-id'.
+Each marked span is replaced by its `agent-shell-region-text' value."
+  (with-temp-buffer
+    (insert prompt)
+    (goto-char (point-min))
+    (let (match)
+      (while (setq match (text-property-search-forward
+                          'agent-shell-region-id nil
+                          (lambda (_ val) val)))
+        (when-let* ((full-text (get-text-property
+                                (prop-match-beginning match)
+                                'agent-shell-region-text))
+                    (beg (prop-match-beginning match)))
+          (delete-region beg (prop-match-end match))
+          (goto-char beg)
+          (insert full-text))))
+    (buffer-string)))
+
 (cl-defun agent-shell--send-command (&key prompt shell-buffer)
   "Send PROMPT to agent using SHELL-BUFFER."
-  (let* ((content-blocks (condition-case nil
-                             (agent-shell--build-content-blocks prompt)
+  (let* ((expanded-prompt (agent-shell--expand-truncated-regions prompt))
+         (content-blocks (condition-case nil
+                             (agent-shell--build-content-blocks expanded-prompt)
                            (error `[((type . "text")
-                                     (text . ,(substring-no-properties prompt)))])))
+                                     (text . ,(substring-no-properties expanded-prompt)))])))
          (attached-files (agent-shell--collect-attached-files content-blocks)))
     (when attached-files
       (agent-shell--display-attached-files attached-files))
@@ -5476,7 +5496,7 @@ first-prompt title is left in place."
     (agent-shell--append-transcript
      :text (format "## User (%s)\n\n%s\n\n"
                    (format-time-string "%F %T")
-                   (agent-shell--indent-markdown-headers prompt))
+                   (agent-shell--indent-markdown-headers expanded-prompt))
      :file-path agent-shell--transcript-file)
 
     (when-let* ((viewport-buffer (agent-shell-viewport--buffer
@@ -6767,7 +6787,8 @@ If CAP is non-nil, truncate at CAP."
                                                (prop-match-end match))
                                 (goto-char (prop-match-beginning match))
                                 (insert full-text))))))
-                 'agent-shell-region-id id)
+                 'agent-shell-region-id id
+                 'agent-shell-region-text full-text)
               (string-join final-lines "\n"))))))))
 
 

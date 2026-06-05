@@ -438,6 +438,36 @@
     (let ((uris (agent-shell--collect-attached-files blocks)))
       (should (= (length uris) 2)))))
 
+(ert-deftest agent-shell--expand-truncated-regions-test ()
+  "Test `agent-shell--expand-truncated-regions' substitutes marked spans for their full text."
+  ;; No marked regions: prompt unchanged.
+  (should (equal (agent-shell--expand-truncated-regions "plain prompt") "plain prompt"))
+
+  ;; Single marked region: span replaced with `agent-shell-region-text'.
+  (let* ((preview (propertize "1: foo\n   Expand..."
+                              'agent-shell-region-id 'r1
+                              'agent-shell-region-text "1: foo\n2: bar\n3: baz"))
+         (prompt (concat "before " preview " after")))
+    (should (equal (agent-shell--expand-truncated-regions prompt)
+                   "before 1: foo\n2: bar\n3: baz after")))
+
+  ;; Multiple marked regions: each expanded; forward iteration handles all.
+  (let* ((a (propertize "A-preview"
+                        'agent-shell-region-id 'a
+                        'agent-shell-region-text "A-full"))
+         (b (propertize "B-preview"
+                        'agent-shell-region-id 'b
+                        'agent-shell-region-text "B-full-LONGER"))
+         (prompt (concat "x " a " y " b " z")))
+    (should (equal (agent-shell--expand-truncated-regions prompt)
+                   "x A-full y B-full-LONGER z")))
+
+  ;; Region with id but missing text property: span left alone.
+  (let ((prompt (concat "keep "
+                        (propertize "preview" 'agent-shell-region-id 'r)
+                        " me")))
+    (should (equal (agent-shell--expand-truncated-regions prompt) "keep preview me"))))
+
 (ert-deftest agent-shell--send-command-integration-test ()
   "Integration test: verify agent-shell--send-command calls ACP correctly."
   (let ((sent-request nil)
