@@ -1691,20 +1691,20 @@ Includes pretty-printed JSON and a `file a feature request' link."
             (json-pretty-print (point-min) (point-max))
             (buffer-string))))
 
-(defun agent-shell--format-tool-call-input (raw-input)
-  "Format RAW-INPUT from a tool call as a fenced code block.
+(defun agent-shell--format-tool-call-input (acp-raw-input)
+  "Format ACP-RAW-INPUT from a tool call as a fenced code block.
 
-RAW-INPUT is the alist parsed from an ACP tool call's `rawInput' field.
+ACP-RAW-INPUT is the alist parsed from an ACP tool call's `rawInput' field.
 If it has exactly one key whose value is a non-empty string, that value
-is rendered inside a bare fence.  Otherwise RAW-INPUT is rendered as
+is rendered inside a bare fence.  Otherwise ACP-RAW-INPUT is rendered as
 pretty-printed JSON inside a json fence."
-  (if-let* (((= (length raw-input) 1))
-            (value (cdar raw-input))
+  (if-let* (((= (length acp-raw-input) 1))
+            (value (cdar acp-raw-input))
             ((and (stringp value) (not (string-empty-p value)))))
       (format "```\n%s\n```" value)
     (format "```json\n%s\n```"
             (with-temp-buffer
-              (insert (json-encode raw-input))
+              (insert (json-encode acp-raw-input))
               (json-pretty-print-buffer)
               (buffer-string)))))
 
