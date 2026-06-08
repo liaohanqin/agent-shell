@@ -65,6 +65,8 @@ We now have a handful of additional packages to extend the =agent-shell= experie
 - [[https://github.com/eddof13/ob-agent-shell][ob-agent-shell]]: Org Babel backend for executing =agent-shell= source blocks.
 - [[https://github.com/Marx-A00/agent-recall][agent-recall]]: Search, browse, and resume =agent-shell= conversation transcripts.
 - [[https://github.com/lgmoneda/agent-shell-pet][agent-shell-pet]]: Codex-like pets that broadcast agent-shell session states.
+- [[https://github.com/junyi-hou/agent-shell-tramp][agent-shell-tramp]]: Tramp integration for =agent-shell=.
+- [[https://github.com/nohzafk/agent-shell-hud][agent-shell-hud]]: Real-time =agent-shell= status overlay via a floating dashboard.
 * Articles
 - 20Y: [[https://20y.hu/~slink/journal/agent-shell/index.html][Agentic development workflow in Emacs]]
 - Skye: [[https://skyefreeman.com/blog/2026/04/15/how-im-using-llms-with-emacs][How I'm using LLM's via Emacs]].
@@ -235,6 +237,19 @@ You can install via:
 #+end_src
 
 This will automatically install the required dependencies ([[https://melpa.org/#/acp][acp.el]] and [[https://melpa.org/#/shell-maker][shell-maker]]).
+
+*** Optional: image utilities
+
+Pasting images from the clipboard (=agent-shell-send-clipboard-image= or =yank= or =C-y=) and capturing screenshots (=agent-shell-send-screenshot=) rely on external tools. Install the ones for your platform:
+
+| Platform        | Clipboard paste                          | Screenshot capture           |
+|-----------------+------------------------------------------+------------------------------|
+| macOS           | =brew install pngpaste=                    | =screencapture= (preinstalled) |
+| Linux (Wayland) | =wl-paste= (e.g. =apt install wl-clipboard=) | =import= (from ImageMagick)    |
+| Linux (X11)     | =apt install xclip=                        | =import= (from ImageMagick)    |
+| Windows         | =powershell=                               | (not bundled)                |
+
+Handlers are detected at runtime via =executable-find=. See =agent-shell-clipboard-image-handlers= and =agent-shell-screenshot-command= to customize.
 
 *** Doom Emacs
 
@@ -797,12 +812,12 @@ always go to Evil modes if you need to with ~C-z~).
 | agent-shell-permission-icon                   | Icon displayed when shell commands require permission to execute.               |
 | agent-shell-pi-acp-command                    | Command and parameters for the Pi ACP client.                                   |
 | agent-shell-pi-environment                    | Environment variables for the Pi client.                                        |
-| agent-shell-prefer-session-resume             | Prefer ACP session resume over session load when both are available.            |
 | agent-shell-prefer-viewport-interaction       | Non-nil makes ‘agent-shell’ prefer viewport interaction over shell interaction. |
 | agent-shell-preferred-agent-config            | Default agent to use for all new shells.                                        |
 | agent-shell-qwen-acp-command                  | Command and parameters for the Qwen Code client.                                |
 | agent-shell-qwen-authentication               | Configuration for Qwen Code authentication.                                     |
 | agent-shell-qwen-environment                  | Environment variables for the Qwen Code client.                                 |
+| agent-shell-session-restore-verbosity         | How much prior context to show when restoring a session.                        |
 | agent-shell-screenshot-command                | The program to use for capturing screenshots.                                   |
 | agent-shell-section-functions                 | Abnormal hook run after overlays are applied (experimental).                    |
 | agent-shell-session-strategy                  | How to handle sessions when starting a new shell.                               |
@@ -893,6 +908,7 @@ always go to Evil modes if you need to with ~C-z~).
 |                 | agent-shell-previous-permission-button                  | Jump to the previous button.                                                  |
 |                 | agent-shell-prompt-compose                              | Compose an `agent-shell' prompt in a dedicated buffer.                        |
 |                 | agent-shell-queue-request                               | Queue or immediately send a request depending on shell busy state.            |
+| r               | agent-shell-quote-region                                | Quote the active region into the shell's latest prompt.                       |
 |                 | agent-shell-qwen-start                                  | Start an interactive Qwen Code CLI agent shell.                               |
 |                 | agent-shell-remove-pending-request                      | Remove all pending requests or a specific request by REMOVE-INDEX.            |
 | C-x x r         | agent-shell-rename-buffer                               | Rename current shell buffer.                                                  |

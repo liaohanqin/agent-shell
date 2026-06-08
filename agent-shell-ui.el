@@ -159,8 +159,8 @@ O(accumulated-body).  Label-only updates leave the body untouched."
                         (agent-shell-ui--insert-fragment
                          final-model qualified-id (not collapsed) navigation)))))
                   (setq padding-end
-                        (or (when-let ((block-range
-                                        (agent-shell-ui--block-range :position block-start)))
+                        (or (when-let* ((block-range
+                                         (agent-shell-ui--block-range :position block-start)))
                               (map-elt block-range :end))
                             (point)))))
                ;; New block.
@@ -174,7 +174,7 @@ O(accumulated-body).  Label-only updates leave the body untouched."
                 (setq padding-end (point)))))
             (when on-post-process
               (funcall on-post-process))
-            (when-let ((block-range (agent-shell-ui--block-range :position block-start)))
+            (when-let* ((block-range (agent-shell-ui--block-range :position block-start)))
               (list (cons :block block-range)
                     (cons :body (agent-shell-ui--nearest-range-matching-property
                                  :property 'agent-shell-ui-section :value 'body
@@ -201,16 +201,16 @@ the body-arriving-on-labels-only fallback in `agent-shell-ui-update-fragment'.
 Labels are short, prop-free strings — safe to round-trip through the
 buffer."
   (let (fields)
-    (when-let ((range (agent-shell-ui--nearest-range-matching-property
-                       :property 'agent-shell-ui-section :value 'label-right
-                       :from block-start :to block-end)))
+    (when-let* ((range (agent-shell-ui--nearest-range-matching-property
+                        :property 'agent-shell-ui-section :value 'label-right
+                        :from block-start :to block-end)))
       (push (cons :label-right
                   (buffer-substring-no-properties (map-elt range :start)
                                                   (map-elt range :end)))
             fields))
-    (when-let ((range (agent-shell-ui--nearest-range-matching-property
-                       :property 'agent-shell-ui-section :value 'label-left
-                       :from block-start :to block-end)))
+    (when-let* ((range (agent-shell-ui--nearest-range-matching-property
+                        :property 'agent-shell-ui-section :value 'label-left
+                        :from block-start :to block-end)))
       (push (cons :label-left
                   (buffer-substring-no-properties (map-elt range :start)
                                                   (map-elt range :end)))
@@ -345,8 +345,8 @@ are preserved across label updates."
                 (region
                  (save-excursion
                    (goto-char (prop-match-beginning block-match))
-                   (when-let ((m (text-property-search-forward
-                                  'agent-shell-ui-section section t t)))
+                   (when-let* ((m (text-property-search-forward
+                                   'agent-shell-ui-section section t t)))
                      (when (<= (prop-match-end m) (prop-match-end block-match))
                        (cons (prop-match-beginning m)
                              (prop-match-end m)))))))
@@ -405,7 +405,7 @@ In the form:
 
   ((start . 1)
    (end . 3))."
-  (when-let ((qualified-id (map-elt (get-text-property (or position (point)) 'agent-shell-ui-state) :qualified-id)))
+  (when-let* ((qualified-id (map-elt (get-text-property (or position (point)) 'agent-shell-ui-state) :qualified-id)))
     (agent-shell-ui--nearest-range-matching-property
      :property 'agent-shell-ui-state
      :value qualified-id
@@ -456,7 +456,7 @@ NAVIGATION controls navigability:
         (collapsable))
 
     ;; Insert collapse indicator if body exists
-    (when-let ((has-labels (or label-left label-right)))
+    (when-let* ((has-labels (or label-left label-right)))
       (if body
           (progn
             (setq collapsable has-labels)
@@ -876,14 +876,14 @@ that span a line break."
               (found (save-mark-and-excursion
                        ;; In navigatable block already
                        ;; move past it.
-                       (when-let ((state (get-text-property (point) 'agent-shell-ui-state))
-                                  (block (agent-shell-ui--block-range :position (point))))
+                       (when-let* ((state (get-text-property (point) 'agent-shell-ui-state))
+                                   (block (agent-shell-ui--block-range :position (point))))
                          (goto-char (map-elt block :end)))
-                       (when-let ((next (text-property-search-forward
-                                         'agent-shell-ui-state nil
-                                         (lambda (_old-val new-val)
-                                           (and new-val (map-elt new-val :navigatable)))
-                                         t)))
+                       (when-let* ((next (text-property-search-forward
+                                          'agent-shell-ui-state nil
+                                          (lambda (_old-val new-val)
+                                            (and new-val (map-elt new-val :navigatable)))
+                                          t)))
                          (prop-match-beginning next)))))
     (when found
       (deactivate-mark)
@@ -897,14 +897,14 @@ that span a line break."
               (found (save-mark-and-excursion
                        ;; In navigatable block already
                        ;; move to beginning.
-                       (when-let ((state (get-text-property (point) 'agent-shell-ui-state))
-                                  (block (agent-shell-ui--block-range :position (point))))
+                       (when-let* ((state (get-text-property (point) 'agent-shell-ui-state))
+                                   (block (agent-shell-ui--block-range :position (point))))
                          (goto-char (map-elt block :start)))
-                       (when-let ((prev (text-property-search-backward
-                                         'agent-shell-ui-state nil
-                                         (lambda (_old-val new-val)
-                                           (and new-val (map-elt new-val :navigatable)))
-                                         t)))
+                       (when-let* ((prev (text-property-search-backward
+                                          'agent-shell-ui-state nil
+                                          (lambda (_old-val new-val)
+                                            (and new-val (map-elt new-val :navigatable)))
+                                          t)))
                          (prop-match-beginning prev)))))
     (when found
       (deactivate-mark)

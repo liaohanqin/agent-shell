@@ -438,6 +438,65 @@
     (let ((uris (agent-shell--collect-attached-files blocks)))
       (should (= (length uris) 2)))))
 
+(ert-deftest agent-shell--get-numbered-region-test ()
+  "Test `agent-shell--get-numbered-region' preserves selection and respects TRIM."
+  (with-temp-buffer
+    ;; Lines: 1="", 2="foo", 3="", 4="bar", 5="" (trailing newline).
+    (insert "
+foo
+
+bar
+")
+    ;; Without TRIM: empty boundary lines (1 and 5) are preserved.
+    (should (equal (agent-shell--get-numbered-region
+                    :buffer (current-buffer)
+                    :from (point-min)
+                    :to (point-max))
+                   "   1: 
+   2: foo
+   3: 
+   4: bar
+   5: "))
+    ;; With TRIM: empty boundary lines are stripped, internal empty kept.
+    (should (equal (agent-shell--get-numbered-region
+                    :buffer (current-buffer)
+                    :from (point-min)
+                    :to (point-max)
+                    :trim t)
+                   "   2: foo
+   3: 
+   4: bar"))))
+
+(ert-deftest agent-shell--expand-truncated-regions-test ()
+  "Test `agent-shell--expand-truncated-regions' substitutes marked spans for their full text."
+  ;; No marked regions: prompt unchanged.
+  (should (equal (agent-shell--expand-truncated-regions "plain prompt") "plain prompt"))
+
+  ;; Single marked region: span replaced with `agent-shell-region-text'.
+  (let* ((preview (propertize "1: foo\n   Expand..."
+                              'agent-shell-region-id 'r1
+                              'agent-shell-region-text "1: foo\n2: bar\n3: baz"))
+         (prompt (concat "before " preview " after")))
+    (should (equal (agent-shell--expand-truncated-regions prompt)
+                   "before 1: foo\n2: bar\n3: baz after")))
+
+  ;; Multiple marked regions: each expanded; forward iteration handles all.
+  (let* ((a (propertize "A-preview"
+                        'agent-shell-region-id 'a
+                        'agent-shell-region-text "A-full"))
+         (b (propertize "B-preview"
+                        'agent-shell-region-id 'b
+                        'agent-shell-region-text "B-full-LONGER"))
+         (prompt (concat "x " a " y " b " z")))
+    (should (equal (agent-shell--expand-truncated-regions prompt)
+                   "x A-full y B-full-LONGER z")))
+
+  ;; Region with id but missing text property: span left alone.
+  (let ((prompt (concat "keep "
+                        (propertize "preview" 'agent-shell-region-id 'r)
+                        " me")))
+    (should (equal (agent-shell--expand-truncated-regions prompt) "keep preview me"))))
+
 (ert-deftest agent-shell--send-command-integration-test ()
   "Integration test: verify agent-shell--send-command calls ACP correctly."
   (let ((sent-request nil)
@@ -1828,6 +1887,17 @@ code block content
              (lambda () nil)))
     (should-not (agent-shell--prompt-select-session nil))))
 
+(ert-deftest agent-shell--validate-session-strategy-test ()
+  "Test `agent-shell--validate-session-strategy' accepts supported values
+and rejects `new-deferred' and other unknown values."
+  (should-not (agent-shell--validate-session-strategy 'new))
+  (should-not (agent-shell--validate-session-strategy 'latest))
+  (should-not (agent-shell--validate-session-strategy 'prompt))
+  (should-error (agent-shell--validate-session-strategy 'new-deferred)
+                :type 'user-error)
+  (should-error (agent-shell--validate-session-strategy 'bogus)
+                :type 'user-error))
+
 (ert-deftest agent-shell--initiate-session-strategy-new-skips-list-load ()
   "Test `agent-shell--initiate-session' skips list/load when strategy is `new'."
   (with-temp-buffer
@@ -2203,6 +2273,38 @@ code block content
           (should-not (string-match-p "test-session-id"
                                       (substring-no-properties header))))))))
 
+(ert-deftest agent-shell--make-header-graphical-status-fg-test ()
+  "Test graphical header honors a propertized `:status' foreground."
+  (skip-unless (image-type-available-p 'svg))
+  (with-temp-buffer
+    (setq-local agent-shell--state
+                `((:agent-config . ((:buffer-name . "Test")
+                                    (:icon-name . nil)))
+                  (:session . ((:id . "abc")
+                               (:model-id . nil)
+                               (:models . nil)
+                               (:mode-id . nil)
+                               (:modes . nil)))))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () agent-shell--state))
+              ((symbol-function 'agent-shell--context-usage-indicator)
+               (lambda () nil))
+              ((symbol-function 'agent-shell--busy-indicator-frame)
+               (lambda () nil))
+              ((symbol-function 'agent-shell--session-id-indicator)
+               (lambda () nil)))
+      (let* ((agent-shell-header-style 'graphical)
+             (agent-shell--header-cache nil)
+             (header (agent-shell--make-header
+                      agent-shell--state
+                      :position "1/3"
+                      :status (propertize "Edit" 'face '(:foreground "#00ff00"))))
+             (svg-data (plist-get (cdr (get-text-property 1 'display header))
+                                  :data)))
+        (should (string-match-p ">1/3</tspan>" svg-data))
+        (should (string-match-p "<tspan[^>]*fill=\"#00ff00\"[^>]*>Edit"
+                                svg-data))))))
+
 ;;; Tests for agent-shell--dot-subdir-in-repo
 
 (ert-deftest agent-shell--dot-subdir-in-repo-returns-path-test ()
@@ -2325,9 +2427,9 @@ code block content
            (agent-shell-permission-responder-function
             (lambda (request)
               (setq handler-received request)
-              (when-let ((opt (seq-find
-                               (lambda (o) (equal (map-elt o :kind) "allow_once"))
-                               (map-elt request :options))))
+              (when-let* ((opt (seq-find
+                                (lambda (o) (equal (map-elt o :kind) "allow_once"))
+                                (map-elt request :options))))
                 (funcall (map-elt request :respond)
                          (map-elt opt :option-id)))))
            (state `((:buffer . ,(current-buffer))
@@ -2509,13 +2611,11 @@ Based on ACP traffic from https://github.com/xenodium/agent-shell/issues/415."
   (should (equal
            "external_directory (_event.rs)"
            (agent-shell--permission-title
-            :acp-request
-            '((params . ((toolCall . ((toolCallId . "call_ad19e402fcb548c3acd48bbd")
-                                      (status . "pending")
-                                      (title . "external_directory")
-                                      (rawInput . ((filepath . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types/_event.rs")
-                                                   (parentDir . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types")))
-                                      (kind . "other"))))))))))
+            :tool-call
+            '((:title . "external_directory")
+              (:raw-input . ((filepath . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types/_event.rs")
+                             (parentDir . "/home/pmw/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/aws-sdk-s3-1.112.0/src/types")))
+              (:kind . "other"))))))
 
 (ert-deftest agent-shell--permission-title-edit-shows-filename-test ()
   "Test `agent-shell--permission-title' includes filename for edit permission.
@@ -2523,35 +2623,162 @@ Based on ACP traffic from https://github.com/xenodium/agent-shell/issues/415."
   (should (equal
            "edit (s3notifications.rs)"
            (agent-shell--permission-title
-            :acp-request
-            '((params . ((toolCall . ((toolCallId . "call_451e5acf91884aecaadf3173")
-                                      (status . "pending")
-                                      (title . "edit")
-                                      (rawInput . ((filepath . "/home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs")
-                                                   (diff . "Index: /home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs\n")))
-                                      (kind . "edit"))))))))))
+            :tool-call
+            '((:title . "edit")
+              (:raw-input . ((filepath . "/home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs")
+                             (diff . "Index: /home/pmw/Repos/warmup-s3-archives/src/s3notifications.rs\n")))
+              (:kind . "edit"))))))
 
 (ert-deftest agent-shell--permission-title-no-duplicate-filename-test ()
   "Test `agent-shell--permission-title' does not duplicate filename already in title."
   (should (equal
            "Read s3notifications.rs"
            (agent-shell--permission-title
-            :acp-request
-            '((params . ((toolCall . ((toolCallId . "tc-1")
-                                      (title . "Read s3notifications.rs")
-                                      (rawInput . ((filepath . "/home/user/src/s3notifications.rs")))
-                                      (kind . "read"))))))))))
+            :tool-call
+            '((:title . "Read s3notifications.rs")
+              (:raw-input . ((filepath . "/home/user/src/s3notifications.rs")))
+              (:kind . "read"))))))
 
 (ert-deftest agent-shell--permission-title-execute-fenced-test ()
   "Test `agent-shell--permission-title' fences execute commands."
   (should (equal
            "```console\nls -la\n```"
            (agent-shell--permission-title
-            :acp-request
-            '((params . ((toolCall . ((toolCallId . "tc-1")
-                                      (title . "Bash")
-                                      (rawInput . ((command . "ls -la")))
-                                      (kind . "execute"))))))))))
+            :tool-call
+            '((:title . "Bash")
+              (:raw-input . ((command . "ls -la")))
+              (:kind . "execute"))))))
+
+(ert-deftest agent-shell--permission-title-content-folded-test ()
+  "Append ACP `content' text after the title.
+Based on Jane Street AIDE permission requests from
+https://github.com/xenodium/agent-shell-js/issues/27 where
+structured `content' carries the user-facing detail and there
+is no `rawInput'."
+  (should (equal
+           "Link Feature\n\nAllow linking to this session?"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "Link Feature")
+              (:kind . "other")
+              (:content . [((type . "content")
+                            (content (type . "text")
+                                     (text . "Allow linking to this session?")))]))))))
+
+(ert-deftest agent-shell--permission-title-content-dedup-against-title-test ()
+  "Skip `content' text already mentioned in the title.
+Claude populates `content' with the same string as
+`rawInput.description'; we should not duplicate the description
+when it is already in the rendered text."
+  (should (equal
+           "```console\nping -c 4 localhost\n```\n\nPing localhost 4 times"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "ping -c 4 localhost")
+              (:kind . "execute")
+              (:raw-input . ((command . "ping -c 4 localhost")
+                             (description . "Ping localhost 4 times")))
+              (:content . [((type . "content")
+                            (content (type . "text")
+                                     (text . "Ping localhost 4 times")))]))))))
+
+(ert-deftest agent-shell--permission-title-content-substring-skipped-test ()
+  "Skip `content' text that is a substring of the existing title."
+  (should (equal
+           "Read foo.rs"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "Read foo.rs")
+              (:kind . "read")
+              (:content . [((type . "content")
+                            (content (type . "text")
+                                     (text . "Read foo.rs")))]))))))
+
+(ert-deftest agent-shell--permission-title-locations-appended-test ()
+  "Append `locations' paths not already mentioned in the title."
+  (should (equal
+           "Search-url Fetch (https://google.com)"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "Search-url Fetch")
+              (:kind . "other")
+              (:locations . [((path . "https://google.com"))]))))))
+
+(ert-deftest agent-shell--permission-title-locations-skipped-when-in-title-test ()
+  "Skip `locations' paths already present in the title."
+  (should (equal
+           "`echo hi`"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "`echo hi`")
+              (:kind . "execute")
+              (:locations . [((path . "echo hi"))]))))))
+
+(ert-deftest agent-shell--permission-title-locations-skipped-when-in-content-test ()
+  "Skip `locations' paths already embedded inside `content' text.
+AIDE's url_fetch request sends the URL in both `content' (inside
+a JSON code block) and `locations'; only one copy should render."
+  (should (equal
+           "Search-url Fetch\n\nCall url_fetch with {\"url\": \"https://google.com\"}"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "Search-url Fetch")
+              (:kind . "other")
+              (:content . [((type . "content")
+                            (content (type . "text")
+                                     (text . "Call url_fetch with {\"url\": \"https://google.com\"}")))])
+              (:locations . [((path . "https://google.com"))]))))))
+
+(ert-deftest agent-shell--permission-title-locations-basename-skipped-test ()
+  "Skip `locations' paths whose basename was already shown via `rawInput'.
+Some agents populate both `rawInput.filepath' (which we render as
+basename) and `locations' (which has the absolute path); only one
+copy should render."
+  (should (equal
+           "edit (foo.rs)"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "edit")
+              (:kind . "edit")
+              (:raw-input . ((filepath . "/home/user/foo.rs")))
+              (:locations . [((path . "/home/user/foo.rs"))]))))))
+
+(ert-deftest agent-shell--permission-title-other-kind-single-stringy-raw-input-test ()
+  "Surface single stringy `rawInput' value for `other'-kind tools.
+OpenCode sends `emacs_eval-elisp' permission requests with the
+expression in `rawInput' and no structured `content'."
+  (should (equal
+           "emacs_eval-elisp\n\n```\n(+ 1 2 3)\n```"
+           (agent-shell--permission-title
+            :tool-call
+            '((:title . "emacs_eval-elisp")
+              (:kind . "other")
+              (:raw-input . ((expression . "(+ 1 2 3)"))))))))
+
+(ert-deftest agent-shell--permission-title-other-kind-raw-input-dedup-against-content-test ()
+  "Skip `rawInput' fence when its value already appears in `content'."
+  (should (equal
+           "emacs_eval-elisp\n\n(+ 1 2 3)"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "emacs_eval-elisp")
+              (:kind . "other")
+              (:raw-input . ((expression . "(+ 1 2 3)")))
+              (:content . [((type . "content")
+                            (content (type . "text")
+                                     (text . "(+ 1 2 3)")))]))))))
+
+(ert-deftest agent-shell--permission-title-empty-content-and-locations-test ()
+  "Empty `content' / `locations' vectors should not affect the title.
+Gemini sends these fields as empty arrays."
+  (should (equal
+           "git log --reverse | head -n 1"
+           (agent-shell--permission-title
+            :tool-call
+            `((:title . "git log --reverse | head -n 1")
+              (:kind . "execute")
+              (:content . [])
+              (:locations . []))))))
 
 (ert-deftest agent-shell-restart-preserves-default-directory ()
   "Restart should use the shell's directory, not the fallback buffer's.
@@ -2611,7 +2838,7 @@ that fallback buffer, potentially starting the new shell in the wrong project."
         (kill-buffer shell-buffer))
       (when (and other-buffer (buffer-live-p other-buffer))
         (kill-buffer other-buffer))
-      (when-let ((buf (get-buffer "*test-restart-new-shell*")))
+      (when-let* ((buf (get-buffer "*test-restart-new-shell*")))
         (kill-buffer buf)))))
 
 (ert-deftest agent-shell-sort-sessions-by-recency-test ()
@@ -2702,6 +2929,132 @@ and it must handle that cleanly."
   (should (null (agent-shell-trim nil)))
   (should (equal "" (agent-shell-trim "")))
   (should (equal "" (agent-shell-trim "\n\n  \t  \n\n"))))
+
+(defun agent-shell-tests--make-session-update (kind text)
+  "Build a fake `session/update' notification of KIND with TEXT.
+KIND is a sessionUpdate string such as \"user_message_chunk\"."
+  `((method . "session/update")
+    (params . ((update . ((sessionUpdate . ,kind)
+                          (content . ((type . "text")
+                                      (text . ,text))))))))
+)
+
+(ert-deftest agent-shell--restore-summary-picks-first-user-and-last-agent ()
+  "Test summary accumulation keeps first user prompt and last agent reply."
+  (let ((state (list (cons :restore-summary nil))))
+    (agent-shell--restore-summary-init state)
+    (dolist (notif (list
+                    (agent-shell-tests--make-session-update "user_message_chunk" "Hello ")
+                    (agent-shell-tests--make-session-update "user_message_chunk" "world")
+                    (agent-shell-tests--make-session-update "agent_message_chunk" "Hi ")
+                    (agent-shell-tests--make-session-update "agent_message_chunk" "there")
+                    (agent-shell-tests--make-session-update "user_message_chunk" "second prompt")
+                    (agent-shell-tests--make-session-update "agent_message_chunk" "intermediate")
+                    (agent-shell-tests--make-session-update "tool_call" "ignored")
+                    (agent-shell-tests--make-session-update "agent_message_chunk" "final answer")))
+      (agent-shell--restore-summary-handle-notification state notif))
+    (agent-shell--restore-summary-commit-in-flight
+     (map-elt state :restore-summary))
+    (should (equal (map-elt (map-elt state :restore-summary) :first-user)
+                   "Hello world"))
+    (should (equal (map-elt (map-elt state :restore-summary) :last-agent)
+                   "final answer"))))
+
+(ert-deftest agent-shell--restore-summary-handles-non-text-content ()
+  "Test summary accumulator falls back to a placeholder for non-text content."
+  (let ((state (list (cons :restore-summary nil))))
+    (agent-shell--restore-summary-init state)
+    (agent-shell--restore-summary-handle-notification
+     state
+     '((method . "session/update")
+       (params . ((update . ((sessionUpdate . "user_message_chunk")
+                             (content . ((type . "image")))))))))
+    (agent-shell--restore-summary-commit-in-flight
+     (map-elt state :restore-summary))
+    (should (equal (map-elt (map-elt state :restore-summary) :first-user)
+                   "[image]"))))
+
+(ert-deftest agent-shell--use-session-load-p-modes ()
+  "Test `agent-shell--use-session-load-p' across context/protocol combinations."
+  ;; summary mode forces session/load when supported
+  (let ((agent-shell-restore-context 'summary))
+    (should (agent-shell--use-session-load-p
+             '((:supports-session-load . t)
+               (:supports-session-resume . t))))
+    ;; summary falls back to resume when load unsupported
+    (should-not (agent-shell--use-session-load-p
+                 '((:supports-session-load . nil)
+                   (:supports-session-resume . t)))))
+  ;; full mode forces session/load when supported
+  (let ((agent-shell-restore-context 'full))
+    (should (agent-shell--use-session-load-p
+             '((:supports-session-load . t)
+               (:supports-session-resume . t)))))
+  ;; minimal mode prefers resume when available
+  (let ((agent-shell-restore-context 'minimal))
+    (should-not (agent-shell--use-session-load-p
+                 '((:supports-session-load . t)
+                   (:supports-session-resume . t))))
+    ;; minimal falls back to load when resume unavailable
+    (should (agent-shell--use-session-load-p
+             '((:supports-session-load . t)
+               (:supports-session-resume . nil))))))
+
+(ert-deftest agent-shell--initiate-session-summary-mode-uses-session-load ()
+  "Test that `summary' mode bypasses `session/resume' in favor of `session/load'."
+  (with-temp-buffer
+    (let* ((agent-shell-session-strategy 'latest)
+           (agent-shell-restore-context 'summary)
+           (requests '())
+           (session-init-called nil)
+           (state (list (cons :buffer (current-buffer))
+                        (cons :client 'test-client)
+                        (cons :session (list (cons :id nil)
+                                             (cons :mode-id nil)
+                                             (cons :modes nil)))
+                        (cons :supports-session-list t)
+                        (cons :supports-session-load t)
+                        (cons :supports-session-resume t)
+                        (cons :restore-summary nil)
+                        (cons :active-requests nil)
+                        (cons :event-subscriptions nil))))
+      (setq-local agent-shell--state state)
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell--update-fragment)
+                 (lambda (&rest _args) nil))
+                ((symbol-function 'agent-shell--update-header-and-mode-line)
+                 (lambda () nil))
+                ((symbol-function 'agent-shell-cwd)
+                 (lambda () "/tmp"))
+                ((symbol-function 'agent-shell--resolve-path)
+                 (lambda (path) path))
+                ((symbol-function 'agent-shell--mcp-servers)
+                 (lambda () []))
+                ((symbol-function 'acp-send-request)
+                 (lambda (&rest args)
+                   (push args requests)
+                   (let* ((request (plist-get args :request))
+                          (method (map-elt request :method)))
+                     (pcase method
+                       ("session/list"
+                        (funcall (plist-get args :on-success)
+                                 '((sessions . [((sessionId . "session-abc")
+                                                 (cwd . "/tmp")
+                                                 (title . "Some session"))]))))
+                       ("session/load"
+                        (funcall (plist-get args :on-success) '()))
+                       (_ (error "Unexpected method: %s" method)))))))
+        (agent-shell--initiate-session
+         :shell-buffer (current-buffer)
+         :on-session-init (lambda ()
+                            (setq session-init-called t)))
+        (should (equal (mapcar (lambda (req)
+                                 (map-elt (plist-get req :request) :method))
+                               (nreverse requests))
+                       '("session/list" "session/load")))
+        (should session-init-called)
+        (should-not (map-elt agent-shell--state :restore-summary))))))
 
 (provide 'agent-shell-tests)
 ;;; agent-shell-tests.el ends here

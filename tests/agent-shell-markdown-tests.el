@@ -757,6 +757,44 @@ after" nil)))))
   (should (equal '("❌ Killed")
                  (agent-shell-markdown--table-wrap-text "❌ Killed" 9))))
 
+(ert-deftest agent-shell-markdown-text-has-face-p ()
+  ;; Detects whether a string carries a `face' property anywhere —
+  ;; the trigger for routing table cell measurement through the
+  ;; pixel-accurate path when a theme's inline-code/bold/etc. face
+  ;; renders at a different pixel width than `string-width' reports.
+  (should-not (agent-shell-markdown--text-has-face-p "plain"))
+  (should (agent-shell-markdown--text-has-face-p
+           (propertize "styled" 'face 'bold)))
+  ;; Mid-string face is detected too — not just at position 0.
+  (should (agent-shell-markdown--text-has-face-p
+           (concat "a" (propertize "b" 'face 'bold) "c"))))
+
+(ert-deftest agent-shell-markdown-table-wrap-text-accepts-window ()
+  ;; `--table-wrap-text' grew an optional WINDOW arg so wrap decisions
+  ;; can factor in face-induced pixel widening (themes that style
+  ;; inline-code with a wider font would otherwise let an N-char wrap
+  ;; line overflow an N-cell column in pixel terms and push the right
+  ;; pipe out of line).  Pin the signature here and the no-window
+  ;; behaviour (existing char-width path, unchanged).  In batch the
+  ;; pixel path is unreachable, so a non-nil WINDOW falls back to the
+  ;; char-width path and produces the same wrap as the 2-arg call.
+  (should (equal '("hello" "world")
+                 (agent-shell-markdown--table-wrap-text "hello world" 5)))
+  (should (equal '("hello" "world")
+                 (agent-shell-markdown--table-wrap-text
+                  "hello world" 5 nil))))
+
+(ert-deftest agent-shell-markdown-table-wrap-char-width-accepts-window ()
+  ;; `--table-wrap-char-width' grew an optional WINDOW arg so styled
+  ;; chars can scale by the face's measured pixel-width ratio.  Pin
+  ;; the signature and the no-window behaviour (char-width / VS-16
+  ;; correction unchanged).
+  (should (= 1 (agent-shell-markdown--table-wrap-char-width "a" 0)))
+  (should (= 1 (agent-shell-markdown--table-wrap-char-width "a" 0 nil)))
+  ;; VS-16 still gets its width-1 attribution under both signatures.
+  (should (= 1 (agent-shell-markdown--table-wrap-char-width "⚠️" 1)))
+  (should (= 1 (agent-shell-markdown--table-wrap-char-width "⚠️" 1 nil))))
+
 (ert-deftest agent-shell-markdown-table-apply-height-scaling-short-circuits ()
   ;; ASCII-only strings skip the per-char height measurement loop and
   ;; pass through unchanged (the costly `window-text-pixel-size'

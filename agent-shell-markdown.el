@@ -144,11 +144,11 @@
   :group 'agent-shell-markdown)
 
 (defface agent-shell-markdown-source-block
-  '((t :inherit lazy-highlight :extend t))
+  '((t :inherit org-block :foreground unspecified :extend t))
   "Background face applied to rendered fenced source-block bodies.
-`:extend t' makes the background color reach the right edge of
-the window, so the block reads as a contiguous panel rather than
-a per-char highlight."
+Inherits background from `org-block'.  `:foreground unspecified'
+preserves font-lock colors.  `:extend t' fills the line to the
+window edge."
   :group 'agent-shell-markdown)
 
 (defface agent-shell-markdown-source-block-language
@@ -834,11 +834,11 @@ with `emacs-lisp-mode' face properties on the body and a
                                                   (marker-position body-start))
           (add-text-properties (marker-position body-start) body-bg-end
                                `(agent-shell-markdown-frozen t
-                                 agent-shell-non-trimmable t
-                                 rear-nonsticky (agent-shell-markdown-frozen
-                                                 agent-shell-non-trimmable)
-                                 line-prefix ,prefix
-                                 wrap-prefix ,prefix))
+                                                             agent-shell-non-trimmable t
+                                                             rear-nonsticky (agent-shell-markdown-frozen
+                                                                             agent-shell-non-trimmable)
+                                                             line-prefix ,prefix
+                                                             wrap-prefix ,prefix))
           ;; Insert an actionable "LANG ⧉" / "snippet ⧉" label and the
           ;; surrounding panel padding as REAL BUFFER TEXT — no
           ;; `display' properties (which previously caused the body's
@@ -863,10 +863,22 @@ with `emacs-lisp-mode' face properties on the body and a
                  (content-start (copy-marker (marker-position body-start) t))
                  (kill-action (lambda ()
                                 (interactive)
-                                (kill-new (buffer-substring-no-properties
-                                           (marker-position content-start)
-                                           (marker-position body-end)))
-                                (message "Copied")))
+                                ;; Locate the body by text property in
+                                ;; the current buffer so copy works in
+                                ;; any buffer that received a propertized
+                                ;; copy of the rendered block (e.g. the
+                                ;; viewport).
+                                (when-let* ((start (next-single-property-change
+                                                    (point)
+                                                    'agent-shell-markdown-source-block-body))
+                                            ((get-text-property
+                                              start
+                                              'agent-shell-markdown-source-block-body))
+                                            (end (next-single-property-change
+                                                  start
+                                                  'agent-shell-markdown-source-block-body)))
+                                  (kill-new (buffer-substring-no-properties start end))
+                                  (message "Copied"))))
                  (vpad-line (propertize "\n"
                                         'face 'agent-shell-markdown-source-block
                                         'line-prefix prefix
@@ -900,6 +912,12 @@ with `emacs-lisp-mode' face properties on the body and a
               (add-text-properties (marker-position body-start)
                                    (marker-position content-start)
                                    carried))
+            ;; Tag body content so the label's copy action can locate
+            ;; it by text property, survives a propertized copy into
+            ;; another buffer (e.g. viewport).
+            (put-text-property (marker-position content-start)
+                               (marker-position body-end)
+                               'agent-shell-markdown-source-block-body t)
             ;; Bottom vpad: insert a single tinted `\\n' AFTER the
             ;; body's trailing newline so the panel ends on a blank
             ;; tinted line below the last body line.  body-end
@@ -1251,18 +1269,22 @@ ASCII-only strings short-circuit and are returned unchanged."
 (cl-defun agent-shell-markdown--table-display-width (&key str window)
   "Return display width of STR in character units.
 
-ASCII content uses the cheap `string-width'.  Any non-ASCII
-content routes through `window-text-pixel-size' so that column
-widths reflect the actual rendered pixel width rather than a
-`string-width' approximation.  Mixing the two paths within a
-column (some rows ASCII-padded, some pixel-padded) accumulates
-fractional drift on the right edge of the column and visibly
-misaligns the vertical pipes between rows."
+ASCII content with no face properties uses the cheap
+`string-width'.  Non-ASCII content, or ASCII content carrying a
+`face' property (whose font may render at a different pixel
+width — e.g. a theme styling inline-code with a wider family),
+routes through `window-text-pixel-size' so column widths reflect
+the actual rendered pixel width rather than a `string-width'
+approximation.  Mixing the two paths within a column (some rows
+ASCII-padded, some pixel-padded) accumulates fractional drift on
+the right edge of the column and visibly misaligns the vertical
+pipes between rows."
   (if (and window
            (window-live-p window)
            (fboundp 'window-text-pixel-size)
            (display-graphic-p)
-           (not (string-match-p (rx bos (* ascii) eos) str)))
+           (or (not (string-match-p (rx bos (* ascii) eos) str))
+               (agent-shell-markdown--text-has-face-p str)))
       (condition-case nil
           (let ((char-px (agent-shell-markdown--table-char-pixel-width window))
                 (real-px (agent-shell-markdown--table-measure-string str window)))
@@ -1307,7 +1329,44 @@ Accounts for borders and padding (`| X | Y |' = 2 padding +
                         (max m (floor (- w (* s ratio)))))
                       natural-widths min-widths shrinkable)))))))
 
-(defun agent-shell-markdown--table-wrap-char-width (text pos)
+(defun agent-shell-markdown--text-has-face-p (text)
+  "Return non-nil if TEXT carries any `face' text property.
+Used to decide whether table cell measurement / wrap must take the
+pixel-accurate path: a face like `agent-shell-markdown-inline-code'
+that pulls in a different font family or weight can render at a
+different pixel width than `string-width' reports."
+  (or (get-text-property 0 'face text)
+      (next-single-property-change 0 'face text)))
+
+(defvar-local agent-shell-markdown--table-face-width-cache nil
+  "Hash table mapping face value → pixel-width ratio vs unfaced text.
+Cache lives in the destination buffer so per-buffer font settings
+(text scaling, face remapping) get their own ratios.  Lazily
+initialized.")
+
+(defun agent-shell-markdown--table-face-width-ratio (face window)
+  "Return pixel-width ratio of FACE-styled text vs unfaced text in WINDOW.
+A ratio of 1.0 means FACE doesn't affect rendered char width.
+Cached per face in the destination buffer.
+
+Ratios are always positive floats, so `nil' from `gethash' reliably
+means \"not cached yet\" — no sentinel needed."
+  (with-current-buffer (window-buffer window)
+    (unless agent-shell-markdown--table-face-width-cache
+      (setq agent-shell-markdown--table-face-width-cache
+            (make-hash-table :test 'equal)))
+    (or (gethash face agent-shell-markdown--table-face-width-cache)
+        (let* ((sample "MMMMMMMMMM")
+               (plain-px (agent-shell-markdown--table-measure-string
+                          sample window)))
+          (puthash face
+                   (if (zerop plain-px) 1.0
+                     (/ (float (agent-shell-markdown--table-measure-string
+                                (propertize sample 'face face) window))
+                        plain-px))
+                   agent-shell-markdown--table-face-width-cache)))))
+
+(cl-defun agent-shell-markdown--table-wrap-char-width (text pos &optional window)
   "Return the display width contribution of the char at POS in TEXT.
 
 Mostly `char-width', but with one correction: U+FE0F VARIATION
@@ -1316,11 +1375,41 @@ widening that glyph to 2 cells (e.g. `⚠' alone renders 1 col,
 `⚠\\uFE0F' / `⚠️' renders 2).  `char-width' reports 1 for `⚠' and
 0 for VS-16 — summing to 1 — even though the combined grapheme
 takes 2 cells.  We compensate by attributing width 1 to VS-16
-itself so the running total over the grapheme equals 2."
-  (let ((ch (seq-elt text pos)))
-    (if (= ch #xFE0F) 1 (char-width ch))))
+itself so the running total over the grapheme equals 2.
 
-(defun agent-shell-markdown--table-wrap-text (text width)
+When WINDOW is a live graphic window and the char carries a `face'
+property, the result is scaled by the face's measured pixel-width
+ratio (see `agent-shell-markdown--table-face-width-ratio') so wrap
+decisions match the rendered width.  This catches themes where
+inline-code or bold faces pull in a wider/narrower font and the
+unscaled `char-width' undercounts — letting an N-char wrap line
+overflow an N-cell column and push the right pipe out of line."
+  (let* ((ch (seq-elt text pos))
+         (base (if (= ch #xFE0F) 1 (char-width ch))))
+    (if-let* ((face (and window
+                         (window-live-p window)
+                         (display-graphic-p)
+                         (fboundp 'window-text-pixel-size)
+                         (get-text-property pos 'face text))))
+        (condition-case nil
+            (* base (agent-shell-markdown--table-face-width-ratio
+                     face window))
+          (error base))
+      base)))
+
+(defun agent-shell-markdown--table-wrap-string-width (text window)
+  "Return face-aware display width of TEXT in cells.
+Like `string-width' but, when WINDOW is graphic, scales each char
+by its face's measured pixel-width ratio so the result tracks the
+rendered width rather than the unstyled char count."
+  (let ((sum 0))
+    (dotimes (i (length text))
+      (setq sum (+ sum
+                   (agent-shell-markdown--table-wrap-char-width
+                    text i window))))
+    sum))
+
+(cl-defun agent-shell-markdown--table-wrap-text (text width &optional window)
   "Wrap TEXT to fit within WIDTH, returning a list of lines.
 Preserves text properties across wrapped lines.
 
@@ -1328,10 +1417,16 @@ Uses the VS-16-aware width helper so that emoji presentation
 sequences (`⚠️') count as their actual rendered width (2 cells)
 rather than the `string-width' approximation (1 cell), which
 would otherwise let a 9-rendered-col cell fit inside a 8-col
-column and overflow the table border on render."
+column and overflow the table border on render.
+
+When WINDOW is a live graphic window, char widths also factor in
+any `face' property's pixel-width ratio so wrap lines fit the
+column in pixel terms — themes that style inline-code with a
+different font would otherwise produce wrap lines whose pixel
+width exceeds the column budget, drifting the right pipe."
   (cond
    ((or (null text) (string-empty-p text)) (list ""))
-   ((<= (string-width text)
+   ((<= (agent-shell-markdown--table-wrap-string-width text window)
         ;; Subtract VS-16 occurrences from WIDTH for the fit check —
         ;; each VS-16 widens its base char by 1 cell beyond what
         ;; `string-width' reports, so the effective budget shrinks
@@ -1351,12 +1446,12 @@ column and overflow the table border on render."
           (while (and (< end-pos len)
                       (<= (+ line-width
                              (agent-shell-markdown--table-wrap-char-width
-                              text end-pos))
+                              text end-pos window))
                           width))
             (setq line-width
                   (+ line-width
                      (agent-shell-markdown--table-wrap-char-width
-                      text end-pos)))
+                      text end-pos window)))
             (setq end-pos (1+ end-pos)))
           ;; Make sure at least one char advances even when the very
           ;; first char already exceeds WIDTH (e.g. wide glyph).
@@ -1399,7 +1494,8 @@ via different paths and drift sub-pixel on their right edge."
            (fboundp 'window-text-pixel-size)
            (display-graphic-p)
            (or force-pixel
-               (not (string-match-p (rx bos (* ascii) eos) str))))
+               (not (string-match-p (rx bos (* ascii) eos) str))
+               (agent-shell-markdown--text-has-face-p str)))
       (condition-case nil
           (let* ((char-px (agent-shell-markdown--table-char-pixel-width window))
                  (target-px (* width char-px))
@@ -1462,7 +1558,8 @@ logical rows (skipping the visual continuation lines)."
          (styled-pipe (propertize pipe 'face 'agent-shell-markdown-table-border))
          (wrapped (seq-mapn
                    (lambda (cell width)
-                     (agent-shell-markdown--table-wrap-text cell width))
+                     (agent-shell-markdown--table-wrap-text
+                      cell width window))
                    processed-cells col-widths))
          ;; Per-cell "force pixel padding" flag, decided once from the
          ;; un-wrapped cell content and applied to every wrapped line
@@ -1470,9 +1567,15 @@ logical rows (skipping the visual continuation lines)."
          ;; non-ASCII content (e.g. an em dash) onto one line and pure
          ;; ASCII onto another would render those lines via different
          ;; padding paths and drift sub-pixel apart on their right edge.
+         ;; Face-styled cells (e.g. inline-code) also need the pixel
+         ;; path so padding pins the right edge to the column's pixel
+         ;; budget — when a theme styles inline-code with a wider font
+         ;; the ASCII path's `string-width' undercounts and the right
+         ;; pipe drifts past the column boundary.
          (force-pixel-flags
           (mapcar (lambda (cell)
-                    (not (string-match-p (rx bos (* ascii) eos) cell)))
+                    (or (not (string-match-p (rx bos (* ascii) eos) cell))
+                        (agent-shell-markdown--text-has-face-p cell)))
                   processed-cells))
          (max-lines (apply #'max 1 (mapcar #'length wrapped)))
          (lines '()))
@@ -1811,7 +1914,7 @@ Returns nil when point isn't inside a rendered agent-shell-markdown
 table.  Navigable cells are tagged by the renderer with the
 `agent-shell-markdown-table-cell-start' text property, so separator rows
 and continuation lines of wrapped rows are skipped automatically."
-  (when-let ((region (agent-shell-markdown-table--region-at-point)))
+  (when-let* ((region (agent-shell-markdown-table--region-at-point)))
     (let ((positions nil))
       (save-excursion
         (save-restriction
@@ -1925,7 +2028,7 @@ is consulted for aliases before the `-mode' suffix is appended."
 (defun agent-shell-markdown--open-local-link (url)
   "Open URL as a local file link if possible.
 Return non-nil if handled, nil otherwise."
-  (when-let ((parsed (agent-shell-markdown--parse-local-link url)))
+  (when-let* ((parsed (agent-shell-markdown--parse-local-link url)))
     (find-file (car parsed))
     (when (cdr parsed)
       (goto-char (point-min))
@@ -1944,45 +2047,45 @@ For example:
   \"file:src/bar.el:5\"      => (\"/abs/src/bar.el\" . 5)
   \"file:///tmp/baz.el#L20\" => (\"/tmp/baz.el\" . 20)
   \"https://example.com\"    => nil"
-  (when-let ((match
-              (cond
-               ((string-match
-                 (rx bos "file://"
-                     (group (+? anything))
-                     (optional (or (seq "#L" (group (one-or-more digit)))
-                                   (seq ":" (group (one-or-more digit)))))
-                     eos)
-                 url)
-                (cons (match-string 1 url)
-                      (or (match-string 2 url) (match-string 3 url))))
-               ((string-match
-                 (rx bos "file:"
-                     (group (not (any "/")) (+? anything))
-                     (optional (or (seq "#L" (group (one-or-more digit)))
-                                   (seq ":" (group (one-or-more digit)))))
-                     eos)
-                 url)
-                (cons (match-string 1 url)
-                      (or (match-string 2 url) (match-string 3 url))))
-               ((string-match
-                 (rx bos
-                     (group (? (optional "/") alpha ":/")
-                            (one-or-more (not (any ":#"))))
-                     "#L" (group (one-or-more digit))
-                     eos)
-                 url)
-                (cons (match-string 1 url) (match-string 2 url)))
-               ((string-match
-                 (rx bos
-                     (group (? (optional "/") alpha ":/")
-                            (one-or-more (not (any ":#"))))
-                     ":" (group (one-or-more digit))
-                     eos)
-                 url)
-                (cons (match-string 1 url) (match-string 2 url)))
-               ((not (string-empty-p url))
-                (cons url nil))))
-             (filepath (expand-file-name (car match))))
+  (when-let* ((match
+               (cond
+                ((string-match
+                  (rx bos "file://"
+                      (group (+? anything))
+                      (optional (or (seq "#L" (group (one-or-more digit)))
+                                    (seq ":" (group (one-or-more digit)))))
+                      eos)
+                  url)
+                 (cons (match-string 1 url)
+                       (or (match-string 2 url) (match-string 3 url))))
+                ((string-match
+                  (rx bos "file:"
+                      (group (not (any "/")) (+? anything))
+                      (optional (or (seq "#L" (group (one-or-more digit)))
+                                    (seq ":" (group (one-or-more digit)))))
+                      eos)
+                  url)
+                 (cons (match-string 1 url)
+                       (or (match-string 2 url) (match-string 3 url))))
+                ((string-match
+                  (rx bos
+                      (group (? (optional "/") alpha ":/")
+                             (one-or-more (not (any ":#"))))
+                      "#L" (group (one-or-more digit))
+                      eos)
+                  url)
+                 (cons (match-string 1 url) (match-string 2 url)))
+                ((string-match
+                  (rx bos
+                      (group (? (optional "/") alpha ":/")
+                             (one-or-more (not (any ":#"))))
+                      ":" (group (one-or-more digit))
+                      eos)
+                  url)
+                 (cons (match-string 1 url) (match-string 2 url)))
+                ((not (string-empty-p url))
+                 (cons url nil))))
+              (filepath (expand-file-name (car match))))
     (when (file-exists-p filepath)
       (cons filepath
             (when (cdr match)
