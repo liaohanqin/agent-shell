@@ -4,10 +4,10 @@
 
 ;; Author: Alvaro Ramirez https://xenodium.com
 ;; URL: https://github.com/xenodium/agent-shell
-;; Version: 0.54.1
+;; Version: 0.55.1
 ;; Package-Requires: ((emacs "29.1") (shell-maker "0.93.1") (acp "0.12.2"))
 
-(defconst agent-shell--version "0.54.1")
+(defconst agent-shell--version "0.55.1")
 
 ;; This package is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -3245,7 +3245,7 @@ variable (see makunbound)"))
          :output (funcall (map-elt config :welcome-function)
                           shell-maker--config)))
       ;; TODO: Remove all `new-deferred' code paths.
-      ;; The value was removed from `agent-shell-session-strategy' in 0.54.1
+      ;; The value was removed from `agent-shell-session-strategy' in 0.55.1
       ;; (see `agent-shell--validate-session-strategy'), but the branches
       ;; were left behind temporarily.  Sites to clean up: this branch,
       ;; the `restart' branch (`strategy' let-binding),
