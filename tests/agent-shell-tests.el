@@ -147,21 +147,21 @@
   (dolist (test-case `(;; Graphical display mode
                        ( :graphic t
                          :homogeneous-expected
-                         ,(concat " wait  Update state initialization\n"
-                                  " wait  Update session initialization")
+                         ,(concat " …  Update state initialization\n"
+                                  " …  Update session initialization")
                          :mixed-expected
-                         ,(concat " wait  First task\n"
-                                  " busy  Second task\n"
-                                  " done  Third task"))
+                         ,(concat " …  First task\n"
+                                  " …  Second task\n"
+                                  " ✓  Third task"))
                        ;; Terminal display mode
                        ( :graphic nil
                          :homogeneous-expected
-                         ,(concat "[wait] Update state initialization\n"
-                                  "[wait] Update session initialization")
+                         ,(concat "[…] Update state initialization\n"
+                                  "[…] Update session initialization")
                          :mixed-expected
-                         ,(concat "[wait] First task\n"
-                                  "[busy] Second task\n"
-                                  "[done] Third task"))))
+                         ,(concat "[…] First task\n"
+                                  "[…] Second task\n"
+                                  "[✓] Third task"))))
     (cl-letf (((symbol-function 'display-graphic-p)
                (lambda (&optional _display) (plist-get test-case :graphic))))
       ;; Test homogeneous statuses
