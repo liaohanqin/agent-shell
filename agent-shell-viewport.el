@@ -133,12 +133,6 @@ Returns an alist with insertion details or nil otherwise:
       (error "Cannot override"))
     (let ((insert-start nil)
           (insert-end nil))
-      ;; Is there text to be inserted? Reject while busy.
-      (when (and (agent-shell-viewport--busy-p
-                  :viewport-buffer viewport-buffer)
-                 (or (not (string-empty-p (string-trim text)))
-                     (and override (not (string-empty-p (string-trim override))))))
-        (user-error "Busy... please wait"))
       (agent-shell--display-buffer viewport-buffer)
       (when (and override
                  (with-current-buffer viewport-buffer
@@ -156,7 +150,12 @@ Returns an alist with insertion details or nil otherwise:
       ;; in case viewport compose buffer is created for the
       ;; first time on an ongoing/busy shell session?
       (cond
-       ((agent-shell-viewport--busy-p)
+       ;; Busy with no text/override to drop in -> stay in view mode.
+       ;; When text/override is present, fall through to edit mode so the
+       ;; user can compose; `compose-send-*' will queue on submit.
+       ((and (agent-shell-viewport--busy-p)
+             (string-empty-p (string-trim text))
+             (or (not override) (string-empty-p (string-trim override))))
         (agent-shell-viewport-view-mode))
        (override
         (agent-shell-viewport-edit-mode)
@@ -668,8 +667,6 @@ QUOTED-TEXT is inserted as a block quote as part of the reply."
   (interactive)
   (unless (derived-mode-p 'agent-shell-viewport-view-mode)
     (user-error "Not in a shell viewport buffer"))
-  (when (agent-shell-viewport--busy-p)
-    (user-error "Busy, please wait"))
   (let ((response (or (agent-shell-viewport--response) "")))
     (agent-shell-viewport--setup-reply
      :quoted-text (string-trim (substring-no-properties response)))))
@@ -1120,8 +1117,7 @@ VIEWPORT-BUFFER is the viewport buffer to check."
                                               "Queue reply…"
                                             "Reply…")))
                         ((:function . agent-shell-viewport-quote-reply)
-                         (:description . "Quote reply…")
-                         (:if-not . agent-shell-viewport--busy-p))
+                         (:description . "Quote reply…"))
                         ((:function . agent-shell-viewport-reply-yes)
                          (:description . "Reply \"yes\"")
                          (:if-not . agent-shell-viewport--busy-p))

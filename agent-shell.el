@@ -6162,15 +6162,11 @@ inserted into the shell buffer prompt."
   (let* ((command (read-string "insert command output: "))
          (shell-buffer (or (agent-shell--current-shell)
                            (user-error "No shell available")))
-         (destination-buffer (progn
-                               (when (with-current-buffer shell-buffer
-                                       (shell-maker-busy))
-                                 (user-error "Busy, try later"))
-                               (if (or (derived-mode-p 'agent-shell-viewport-view-mode)
-                                       (derived-mode-p 'agent-shell-viewport-edit-mode))
-                                   (agent-shell-viewport--buffer
-                                    :shell-buffer shell-buffer)
-                                 shell-buffer)))
+         (destination-buffer (if (or (derived-mode-p 'agent-shell-viewport-view-mode)
+                                     (derived-mode-p 'agent-shell-viewport-edit-mode))
+                                 (agent-shell-viewport--buffer
+                                  :shell-buffer shell-buffer)
+                               shell-buffer))
          (output-buffer (with-current-buffer (generate-new-buffer (format "*%s*" command))
                           (insert "$ " command "\n\n")
                           (setq-local buffer-read-only t)
@@ -6202,14 +6198,20 @@ inserted into the shell buffer prompt."
                   (when (memq (process-status process) '(exit signal))
                     (message "Done")
                     (set-window-configuration window-config)
-                    (save-excursion
-                      (goto-char (point-max))
-                      (with-current-buffer destination-buffer
-                        (insert "\n\n" (format "```shell
+                    (let ((code-block (format "```shell
 %s
 ```" (with-current-buffer output-buffer
-       (buffer-string))))))
-                    (agent-shell--render-markdown)
+       (buffer-string)))))
+                      (if (with-current-buffer shell-buffer (shell-maker-busy))
+                          (with-current-buffer shell-buffer
+                            (agent-shell-queue-request
+                             (agent-shell--read-queue-prompt
+                              :initial (concat code-block "\n\n"))))
+                        (with-current-buffer destination-buffer
+                          (save-excursion
+                            (goto-char (point-max))
+                            (insert "\n\n" code-block))
+                          (agent-shell--render-markdown))))
                     (when (buffer-live-p output-buffer)
                       (kill-buffer output-buffer)))))))
     (set-process-query-on-exit-flag proc nil)
@@ -7060,16 +7062,19 @@ Uses optional SHELL-BUFFER to make paths relative to shell project."
 
 When PICK-SHELL is non-nil, prompt for which shell buffer to use."
   (interactive)
-  (let ((shell-buffer (or (when pick-shell
-                            (agent-shell--read-shell-buffer
-                             :prompt "Send region to shell: "))
-                          (agent-shell--shell-buffer))))
-    (agent-shell-insert
-     :text (agent-shell--get-region-context
-            :deactivate t
-            :agent-cwd (with-current-buffer shell-buffer
-                         (agent-shell-cwd)))
-     :shell-buffer shell-buffer)))
+  (let* ((shell-buffer (or (when pick-shell
+                             (agent-shell--read-shell-buffer
+                              :prompt "Send region to shell: "))
+                           (agent-shell--shell-buffer)))
+         (text (agent-shell--get-region-context
+                :deactivate t
+                :agent-cwd (with-current-buffer shell-buffer
+                             (agent-shell-cwd)))))
+    (if (with-current-buffer shell-buffer (shell-maker-busy))
+        (with-current-buffer shell-buffer
+          (agent-shell-queue-request
+           (agent-shell--read-queue-prompt :initial (concat text "\n\n"))))
+      (agent-shell-insert :text text :shell-buffer shell-buffer))))
 
 (defun agent-shell-send-region-to ()
   "Like `agent-shell-send-region' but prompt for which shell to use."
@@ -7083,18 +7088,22 @@ With \\[universal-argument] prefix ARG, force start a new shell.
 
 With \\[universal-argument] \\[universal-argument] prefix ARG, prompt to pick an existing shell."
   (interactive "P")
-  (let ((shell-buffer
-         (cond
-          ((equal arg '(16))
-           (agent-shell--dwim :switch-to-shell t)
-           (agent-shell--shell-buffer))
-          ((equal arg '(4))
-           (agent-shell--dwim :new-shell t)
-           (agent-shell--shell-buffer))
-          (t
-           (agent-shell--shell-buffer)))))
-    (agent-shell-insert :text (agent-shell--context :shell-buffer shell-buffer)
-                        :shell-buffer shell-buffer)))
+  (let* ((shell-buffer
+          (cond
+           ((equal arg '(16))
+            (agent-shell--dwim :switch-to-shell t)
+            (agent-shell--shell-buffer))
+           ((equal arg '(4))
+            (agent-shell--dwim :new-shell t)
+            (agent-shell--shell-buffer))
+           (t
+            (agent-shell--shell-buffer))))
+         (text (agent-shell--context :shell-buffer shell-buffer)))
+    (if (with-current-buffer shell-buffer (shell-maker-busy))
+        (with-current-buffer shell-buffer
+          (agent-shell-queue-request
+           (agent-shell--read-queue-prompt :initial (concat text "\n\n"))))
+      (agent-shell-insert :text text :shell-buffer shell-buffer))))
 
 (cl-defun agent-shell--get-region-context (&key deactivate no-error agent-cwd)
   "Get region as insertable text, ready for sending to agent.
