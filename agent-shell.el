@@ -580,8 +580,7 @@ Goose, Cursor, CodeBuddy, Auggie, and others."
         (agent-shell-mistral-make-config)
         (agent-shell-opencode-make-agent-config)
         (agent-shell-pi-make-agent-config)
-        (agent-shell-qwen-make-agent-config)
-        (agent-shell-hermes-make-agent-config)))
+        (agent-shell-qwen-make-agent-config)))
 
 (defcustom agent-shell-agent-configs
   (agent-shell--make-default-agent-configs)
