@@ -46,7 +46,8 @@
 nil if not currently navigating history.")
 
 (defvar agent-shell-artist--op-info
-  '((line           . ((:key . "l") (:label . "Line")           (:category . "Draw")  (:column . draw)  (:command . artist-select-op-line)))
+  '((pen-line       . ((:key . "p") (:label . "Pen")            (:category . "Draw")  (:column . draw)  (:command . artist-select-op-pen-line)))
+    (line           . ((:key . "l") (:label . "Line")           (:category . "Draw")  (:column . draw)  (:command . artist-select-op-line)))
     (s-line         . ((:key . "L") (:label . "Straight line")  (:category . "Draw")  (:column . draw)  (:command . artist-select-op-straight-line)))
     (rect           . ((:key . "r") (:label . "Rectangle")      (:category . "Draw")  (:column . draw)  (:command . artist-select-op-rectangle)))
     (square         . ((:key . "R") (:label . "Square")         (:category . "Draw")  (:column . draw)  (:command . artist-select-op-square)))
