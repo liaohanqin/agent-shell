@@ -488,7 +488,7 @@ If ~opencode~ is not found by ~agent-shell~, you can add it to the search path
 
 To register the local Qwen2.5:7b model in opencode, two files needs to be edited:
 
-~./config/opencode/opencode.json~
+~/.config/opencode/opencode.json~
 #+BEGIN_SRC js
      {
          "$schema": "https://opencode.ai/config.json",
@@ -512,7 +512,7 @@ To register the local Qwen2.5:7b model in opencode, two files needs to be edited
      }
 #+END_SRC
 
-and a dummy auth file ~./local/share/opencode/auth.json~
+and a dummy auth file ~/.local/share/opencode/auth.json~
 
 #+begin_src js
 {
