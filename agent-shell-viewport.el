@@ -302,6 +302,11 @@ Optionally set its PROMPT and RESPONSE."
          prompt)))
     (when response
       (insert response))
+    ;; Re-render the header from the freshly-cached position.  Without
+    ;; this, callers that set content via this function (e.g.
+    ;; `agent-shell-viewport-refresh' on switch) leave the header showing
+    ;; the previously-rendered position.
+    (agent-shell-viewport--update-header)
     ;; TODO: Render prompt markdown?
     ))
 
