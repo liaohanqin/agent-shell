@@ -1462,28 +1462,54 @@ Text/navigable files open in Emacs; binary files open externally."
       (delete-file text)
       (delete-file binary))))
 
-(ert-deftest agent-shell-markdown-render-functions-receives-source-ranges ()
-  ;; A render function is called with a `:source-ranges' vector covering
-  ;; fenced code blocks, so it can skip delimiters that live inside code.
-  (let ((vector-p nil)
-        (count nil)
-        (covered nil))
+(defun agent-shell-markdown-tests--source-blocks (markdown)
+  "Return the `:source-blocks' descriptors a renderer sees for MARKDOWN.
+Each :block marker range is replaced by the text it spans, so the
+result is stable to compare against.  (The marker behaviour itself is
+exercised by the editing in the -all-math-cases test.)"
+  (let (blocks)
     (with-temp-buffer
       (let ((agent-shell-markdown-render-functions
              (list (lambda (context)
-                     (let ((ranges (map-elt context :source-ranges)))
-                       (setq vector-p (vectorp ranges)
-                             count (length ranges))
-                       (when (> (length ranges) 0)
-                         (let ((range (aref ranges 0)))
-                           (setq covered (buffer-substring-no-properties
-                                          (car range) (cdr range))))))
+                     (setq blocks
+                           (mapcar (lambda (b)
+                                     (list (cons :language (map-elt b :language))
+                                           (cons :block (buffer-substring-no-properties
+                                                         (map-nested-elt b '(:block :start))
+                                                         (map-nested-elt b '(:block :end))))
+                                           (cons :body (map-elt b :body))
+                                           (cons :complete (map-elt b :complete))))
+                                   (map-elt context :source-blocks)))
                      nil))))
-        (insert "text\n```\ncode\n```\n")
+        (insert markdown)
         (agent-shell-markdown-replace-markup)))
-    (should vector-p)
-    (should (= count 1))
-    (should (string-match-p "code" covered))))
+    blocks))
+
+(ert-deftest agent-shell-markdown-render-functions-receives-source-blocks ()
+  ;; A render function is handed `:source-blocks' descriptors: the language,
+  ;; the block's marker range (shown here as the text it spans), the body,
+  ;; and completeness.
+  (should (equal (agent-shell-markdown-tests--source-blocks
+                  "text
+```math
+\\frac{a}{b}
+```
+")
+                 '(((:language . "math")
+                    (:block . "```math\n\\frac{a}{b}\n```\n")
+                    (:body . "\\frac{a}{b}")
+                    (:complete . t))))))
+
+(ert-deftest agent-shell-markdown-render-functions-source-blocks-incomplete ()
+  ;; A still-streaming fence is reported with `:complete' nil and no
+  ;; `:body', so a renderer knows the language but not to claim it yet.
+  (should (equal (agent-shell-markdown-tests--source-blocks
+                  "```math
+\\frac{a}{b")
+                 '(((:language . "math")
+                    (:block . "```math\n\\frac{a}{b")
+                    (:body . nil)
+                    (:complete . nil))))))
 
 (ert-deftest agent-shell-markdown-render-functions-frozen-region-protected ()
   ;; A render function that tags its region `agent-shell-markdown-frozen'
@@ -1524,6 +1550,95 @@ Text/navigable files open in Emacs; binary files open externally."
         (should (= (get-text-property (point-min)
                                       'agent-shell-markdown-watermark)
                    open-dollar))))))
+
+(ert-deftest agent-shell-markdown-render-functions-all-math-cases ()
+  ;; A renderer that claims every math form the PR supports and wraps its
+  ;; LaTeX in brackets: inline \(..\) as [..], and block \[..\], $$..$$ and
+  ;; fenced ```math / ```latex as the multi-line [\n..\n].  It routes the
+  ;; fenced blocks by `:language' and keeps $$ inside a code block literal.
+  (with-temp-buffer
+    (let ((agent-shell-markdown-render-functions
+           (list
+            (lambda (context)
+              ;; Fenced ```math / ```latex blocks, claimed by language.
+              ;; Back-to-front so replacing one block does not disturb the
+              ;; markers of an adjacent earlier one.
+              (dolist (block (reverse (map-elt context :source-blocks)))
+                (when (and (member (map-elt block :language) '("math" "latex"))
+                           (map-elt block :complete))
+                  (let ((start (map-nested-elt block '(:block :start)))
+                        (end (map-nested-elt block '(:block :end)))
+                        (body (map-elt block :body)))
+                    (delete-region start end)
+                    (goto-char start)
+                    (insert (format "[\n%s\n]\n\n" body))
+                    (put-text-property start (point)
+                                       'agent-shell-markdown-frozen t))))
+              ;; Inline / block delimiters, skipping matches that fall
+              ;; inside a non-math code block (so $$ in code stays literal).
+              (let ((code-ranges
+                     (seq-keep
+                      (lambda (b)
+                        (unless (member (map-elt b :language) '("math" "latex"))
+                          (cons (map-nested-elt b '(:block :start))
+                                (map-nested-elt b '(:block :end)))))
+                      (map-elt context :source-blocks))))
+                (dolist (spec (list (list (rx "\\(" (group (*? anychar)) "\\)") "[%s]")
+                                    (list (rx "\\[" (group (*? anychar)) "\\]") "[\n%s\n]\n")
+                                    (list (rx "$$" (group (*? anychar)) "$$") "[\n%s\n]\n")))
+                  (save-excursion
+                    (goto-char (point-min))
+                    (while (re-search-forward (car spec) nil t)
+                      (let ((start (match-beginning 0))
+                            (content (match-string 1)))
+                        (unless (or (get-text-property start 'agent-shell-markdown-frozen)
+                                    (seq-some (lambda (r) (and (>= start (car r))
+                                                              (< start (cdr r))))
+                                              code-ranges))
+                          (replace-match (format (cadr spec) content) nil t)
+                          (put-text-property start (point)
+                                             'agent-shell-markdown-frozen t)))))))
+              nil))))
+      (insert "```python
+q = \"$$not math$$\"
+```
+inline \\(a+b\\) here
+\\[x = y\\]
+$$E = mc^2$$
+```math
+\\frac{a}{b}
+```
+```latex
+\\alpha
+```
+")
+      (agent-shell-markdown-replace-markup)
+      ;; Every math form rendered with its LaTeX in brackets; the $$ inside
+      ;; the python block stayed literal (its language kept it out of reach).
+      (should (equal (buffer-substring-no-properties (point-min) (point-max))
+                     "
+python ⧉
+
+q = \"$$not math$$\"
+
+inline [a+b] here
+[
+x = y
+]
+
+[
+E = mc^2
+]
+
+[
+\\frac{a}{b}
+]
+
+[
+\\alpha
+]
+
+")))))
 
 (provide 'agent-shell-markdown-tests)
 

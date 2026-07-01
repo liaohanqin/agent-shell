@@ -207,9 +207,13 @@ so streaming re-runs don't reprocess it.
 
 CONTEXT keys:
 
-  :source-ranges  Vector of (BEG . END) markers covering fenced
-                  code blocks, so a renderer can skip delimiters
-                  that fall inside code.
+  :source-blocks  List of fenced-block descriptors (see
+                  `agent-shell-markdown--source-blocks'), so a
+                  renderer can claim blocks of its own language
+                  (e.g. math, latex) and skip delimiters that fall
+                  inside other code.  Each descriptor is an alist
+                  with :language, :block (a :start/:end marker
+                  range), :body, and :complete.
 
 Each function returns an alist (nil for no-op).  Recognised keys:
 
@@ -257,6 +261,11 @@ of the buffer, an unclosed inline backtick protects the rest of
 its line, and incomplete bold/italic/strike spans are skipped
 until their closing delimiter arrives.
 
+Before the built-in passes, each function in
+`agent-shell-markdown-render-functions' runs so an external package
+can claim and render regions (e.g. LaTeX math) that the built-in
+passes should leave alone.
+
 Italic, bold, and strike passes loop until a full round makes no
 changes, so adjacent delimiters peel one layer per round
 (e.g. `**_X_**' resolves in two rounds).  Headers, inline code,
@@ -289,21 +298,28 @@ body un-fontified."
                                 '(agent-shell-markdown-watermark nil))))
     (let ((watermark (agent-shell-markdown--watermark-start))
           (external-results)
+          (source-blocks)
           (source-ranges)
           (rendered-ranges)
           (inline-ranges)
           (avoid-ranges))
       (save-restriction
         (narrow-to-region watermark (point-max))
+        (setq source-blocks (agent-shell-markdown--source-blocks))
+        ;; The avoid ranges need to be of the form (start . end).
         (setq source-ranges (agent-shell-markdown--sort-ranges
-                             (agent-shell-markdown--make-markers
-                              (agent-shell-markdown--source-block-ranges))))
-        ;; Run external renderers before the styling passes. They tag
-        ;; their regions `agent-shell-markdown-frozen', so the frozen
-        ;; ranges captured here (and `avoid-ranges' below) pick them up
-        ;; and the styling passes skip them.
-        (setq external-results (agent-shell-markdown--run-render-functions
-                                source-ranges))
+                             (mapcar (lambda (source-block)
+                                       (cons (map-nested-elt source-block '(:block :start))
+                                             (map-nested-elt source-block '(:block :end))))
+                                     source-blocks)))
+        ;; Run external renderers (when any are registered) before the
+        ;; styling passes.  They tag their regions
+        ;; `agent-shell-markdown-frozen', so the frozen ranges captured
+        ;; below (and `avoid-ranges') pick them up and the styling passes
+        ;; skip them.
+        (when agent-shell-markdown-render-functions
+          (setq external-results (agent-shell-markdown--run-render-functions
+                                  source-blocks)))
         (setq rendered-ranges (agent-shell-markdown--make-markers
                                (agent-shell-markdown--frozen-ranges)))
         (setq inline-ranges (agent-shell-markdown--make-markers
@@ -361,20 +377,21 @@ body un-fontified."
                            (list (lambda (s)
                                    (insert (substring-no-properties s))))))
       (agent-shell-markdown--update-watermark
+       :source-blocks source-blocks
        :external-candidates (seq-keep (lambda (result) (map-elt result :watermark))
                                       external-results)))))
 
-(defun agent-shell-markdown--run-render-functions (source-ranges)
-  "Run `agent-shell-markdown-render-functions' over the current buffer.
+(defun agent-shell-markdown--run-render-functions (source-blocks)
+  "Run `agent-shell-markdown-render-functions' with SOURCE-BLOCKS.
 
 Each registered function is called with a single alist context
-holding (:source-ranges . SOURCE-RANGES) and may render and freeze
+holding (:source-blocks . SOURCE-BLOCKS) and may render and freeze
 regions of the current (narrowed) buffer.  Returns the list of
 non-nil result alists, in hook order.
 
 For example, with one renderer returning `((:watermark . 1200))'
 this returns `(((:watermark . 1200)))'."
-  (let ((context (list (cons :source-ranges source-ranges)))
+  (let ((context (list (cons :source-blocks source-blocks)))
         (results '()))
     (run-hook-wrapped 'agent-shell-markdown-render-functions
                       (lambda (fn)
@@ -2391,8 +2408,14 @@ point, a table from there can no longer accumulate."
            (t (setq continue nil))))
         (or rendered-table-start pending-table-start)))))
 
-(cl-defun agent-shell-markdown--update-watermark (&key external-candidates)
+(cl-defun agent-shell-markdown--update-watermark (&key source-blocks external-candidates)
   "Stamp the safe-frontier on the first character as a text property.
+
+SOURCE-BLOCKS is the descriptor list from
+`agent-shell-markdown--source-blocks' taken earlier this pass.  Its
+`:block' markers have tracked every edit since, so the open fence
+(the last block whose `:block' end is still `point-max') is read
+from them directly rather than re-scanning.
 
 Safe-frontier = start of the last line in the buffer, clamped
 back to the start of:
@@ -2415,11 +2438,10 @@ span a newline, so backing off to start-of-last-line covers their
 split-across-chunks case.  Open inline backticks already extend
 only to end-of-line, so they're naturally within that zone."
   (when (> (point-max) (point-min))
-    (let* ((source-ranges (agent-shell-markdown--source-block-ranges))
-           (open-fence-start
-            (let ((last (car (last source-ranges))))
-              (when (and last (= (cdr last) (point-max)))
-                (car last))))
+    (let* ((open-fence-start
+            (when-let* ((last-block (car (last source-blocks)))
+                        ((= (map-nested-elt last-block '(:block :end)) (point-max))))
+              (marker-position (map-nested-elt last-block '(:block :start)))))
            (extending-table-start
             (agent-shell-markdown--extending-table-start))
            (last-line-start
@@ -2440,6 +2462,14 @@ only to end-of-line, so they're naturally within that zone."
             (cons (copy-marker (car range))
                   (copy-marker (cdr range))))
           ranges))
+
+(cl-defun agent-shell-markdown--make-range (&key start end)
+  "Return a range alist `((:start . START) (:end . END))'.
+
+For example, (agent-shell-markdown--make-range :start 1 :end 5)
+returns `((:start . 1) (:end . 5))'."
+  (list (cons :start start)
+        (cons :end end)))
 
 (defun agent-shell-markdown--sort-ranges (&rest range-collections)
   "Merge RANGE-COLLECTIONS into a vector sorted by start position.
@@ -2475,48 +2505,89 @@ the same range on every match inside it."
       (when (and candidate (<= end (cdr candidate)))
         candidate))))
 
-(defun agent-shell-markdown--source-block-ranges ()
-  "Return list of (start . end) ranges covering fenced code blocks.
+(defun agent-shell-markdown--source-blocks ()
+  "Return descriptors for the fenced code blocks in the current buffer.
 
-Each range spans from the opening fence line to the start of the
-line after the closing fence line.  A fence that is open but not
-yet closed (mid-stream) extends to `point-max', so its contents
-are protected as the buffer grows.
+Scans the fenced blocks once and returns one descriptor per block,
+handed to `agent-shell-markdown-render-functions' so a renderer can
+claim fenced blocks of its own language (e.g. math, latex) and skip
+delimiters that fall inside other code.  Each descriptor is an
+alist:
 
-Fence widths pair like CommonMark: an opening fence of N
-backticks (N>=3) is closed only by a fence line with M>=N
-backticks, so a 4-backtick outer fence wraps any 3-backtick inner
-fence as body rather than terminating on it.
+  ((:language . LANGUAGE)   lower-case token after the opening fence
+   (:block . RANGE)         a `:start'/`:end' marker range covering
+                            the whole block, tracking buffer edits
+   (:body . BODY)           body text, or nil while still streaming
+   (:complete . COMPLETE))  t once the closing fence has arrived
+
+RANGE is `((:start . MARKER) (:end . MARKER))' (see
+`agent-shell-markdown--make-range') spanning the opening fence line
+to the start of the line after the closing fence (or `point-max'
+while open).  Fence widths pair like CommonMark: an opening fence
+of N backticks (N>=3) is closed only by a fence line with M>=N
+backticks, so a 4-backtick fence wraps any 3-backtick inner fence
+as body rather than terminating on it.
+
+The avoid-range projection in `agent-shell-markdown-replace-markup'
+and `agent-shell-markdown--update-watermark' read the `:block'
+markers from the same result, so the fence-pairing scan happens
+once per pass.
 
 For example, given the buffer:
 
-  ```python
-  print(\"hi\")
+  ```math
+  \\frac{a}{b}
   ```
 
-returns a list with one range covering the whole block."
-  (let ((ranges '())
+returns one descriptor with :language \"math\", :body
+\"\\frac{a}{b}\", and :complete t."
+  (let ((source-blocks '())
         (open-start nil)
         (open-count nil)
+        (open-language nil)
+        (body-start nil)
         (case-fold-search nil))
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward
               (rx bol (zero-or-more whitespace)
                   (group (>= 3 "`"))
+                  (zero-or-more blank)
+                  (group (zero-or-more (or alphanumeric "-" "+" "#")))
                   (zero-or-more not-newline))
               nil t)
         (let ((count (- (match-end 1) (match-beginning 1))))
           (cond
            ((and open-count (>= count open-count))
-            (push (cons open-start (line-beginning-position 2)) ranges)
-            (setq open-start nil open-count nil))
+            (let ((raw (buffer-substring-no-properties
+                        body-start (match-beginning 0))))
+              (push (list (cons :language open-language)
+                          (cons :block (agent-shell-markdown--make-range
+                                        :start (copy-marker open-start)
+                                        :end (copy-marker (line-beginning-position 2))))
+                          (cons :body (if (string-suffix-p "\n" raw)
+                                          (substring raw 0 -1)
+                                        raw))
+                          (cons :complete t))
+                    source-blocks))
+            (setq open-start nil open-count nil
+                  open-language nil body-start nil))
            ((not open-count)
             (setq open-start (match-beginning 0)
-                  open-count count)))))
+                  open-count count
+                  open-language (downcase
+                                 (buffer-substring-no-properties
+                                  (match-beginning 2) (match-end 2)))
+                  body-start (line-beginning-position 2))))))
       (when open-count
-        (push (cons open-start (point-max)) ranges)))
-    (nreverse ranges)))
+        (push (list (cons :language open-language)
+                    (cons :block (agent-shell-markdown--make-range
+                                  :start (copy-marker open-start)
+                                  :end (copy-marker (point-max))))
+                    (cons :body nil)
+                    (cons :complete nil))
+              source-blocks)))
+    (nreverse source-blocks)))
 
 (defun agent-shell-markdown--frozen-ranges ()
   "Return ranges of buffer chars tagged `agent-shell-markdown-frozen'.
