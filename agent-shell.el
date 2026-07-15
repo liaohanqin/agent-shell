@@ -856,7 +856,6 @@ behavior explicitly."
   :type '(choice (const :tag "None (prompt each time)" nil)
                  (const :tag "Auggie" auggie)
                  (const :tag "Claude Code" claude-code)
-                 (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Cline" cline)
                  (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Codex" codex)
