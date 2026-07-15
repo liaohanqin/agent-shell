@@ -857,7 +857,6 @@ behavior explicitly."
                  (const :tag "Antigravity" antigravity)
                  (const :tag "Auggie" auggie)
                  (const :tag "Claude Code" claude-code)
-                 (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Cline" cline)
                  (const :tag "CodeBuddy" codebuddy)
                  (const :tag "Codex" codex)
