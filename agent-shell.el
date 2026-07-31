@@ -951,6 +951,20 @@ Available values:
          (set-default sym value))
   :group 'agent-shell)
 
+(defcustom agent-shell-new-session-delays '((codebuddy . 2))
+  "Alist of (AGENT-IDENTIFIER . SECONDS) delaying \"session/new\" requests.
+
+Some agents push their available-commands list as soon as
+\"session/new\" returns, before their plugins finish loading, and
+never re-push.  For example, CodeBuddy loads plugin-provided skills
+(e.g. /superpowers:*) a few hundred milliseconds after startup, so
+they are missing from the initial command list.  Delaying
+\"session/new\" for such agents lets the first
+`available_commands_update' include plugin-provided commands."
+  :type '(alist :key-type (symbol :tag "Agent identifier")
+                :value-type (number :tag "Delay in seconds"))
+  :group 'agent-shell)
+
 (defcustom agent-shell-session-choices-function nil
   "Function to transform the choices offered when starting a shell.
 
@@ -6991,7 +7005,28 @@ overwrites an existing fragment with equivalent content."
   (funcall on-session-init))
 
 (cl-defun agent-shell--initiate-new-session (&key shell-buffer on-session-init)
-  "Initiate ACP session/new with SHELL-BUFFER and ON-SESSION-INIT."
+  "Initiate ACP session/new with SHELL-BUFFER and ON-SESSION-INIT.
+
+When the current agent has an entry in `agent-shell-new-session-delays',
+defers the request by the configured number of seconds."
+  (let ((delay (or (map-elt agent-shell-new-session-delays
+                            (map-nested-elt (agent-shell--state)
+                                            '(:agent-config :identifier)))
+                   0)))
+    (if (> delay 0)
+        (run-at-time delay nil
+                     (lambda ()
+                       (when (buffer-live-p shell-buffer)
+                         (with-current-buffer shell-buffer
+                           (agent-shell--send-new-session-request
+                            :shell-buffer shell-buffer
+                            :on-session-init on-session-init)))))
+      (agent-shell--send-new-session-request
+       :shell-buffer shell-buffer
+       :on-session-init on-session-init))))
+
+(cl-defun agent-shell--send-new-session-request (&key shell-buffer on-session-init)
+  "Send ACP session/new request with SHELL-BUFFER and ON-SESSION-INIT."
   (agent-shell--send-request
    :state (agent-shell--state)
    :client (map-elt (agent-shell--state) :client)
