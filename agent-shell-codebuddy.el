@@ -139,19 +139,18 @@ as a [{name value}] array.  This function performs both conversions:
 
 Uses `agent-shell-codebuddy-authentication' for authentication configuration.
 
-When `agent-shell-mcp-servers' is set, passes MCP servers via
-\"--mcp-config\" and \"--strict-mcp-config\" CLI flags.  This ensures
-the dynamic MCP scope takes effect at startup (before MCP
-initialization), correctly overriding any servers with the same name
-in the user-level ~/.codebuddy/.mcp.json."
+When `agent-shell-mcp-servers' is set, passes MCP servers via the
+\"--mcp-config\" CLI flag.  This makes the dynamic MCP scope take
+effect at startup (before MCP initialization).  Servers configured
+here override any servers with the same name in the user-level
+~/.codebuddy/.mcp.json, while other user-level servers remain active."
   (unless buffer
     (error "Missing required argument: :buffer"))
   (let* ((api-key (agent-shell-codebuddy-key))
          (mcp-json (agent-shell-codebuddy--mcp-config-json))
          (command-params (if mcp-json
                              (append (cdr agent-shell-codebuddy-command)
-                                     (list "--mcp-config" mcp-json
-                                           "--strict-mcp-config"))
+                                     (list "--mcp-config" mcp-json))
                            (cdr agent-shell-codebuddy-command))))
     (agent-shell--make-acp-client :command (car agent-shell-codebuddy-command)
                                   :command-params command-params
