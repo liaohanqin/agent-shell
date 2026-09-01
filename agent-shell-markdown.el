@@ -3907,7 +3907,21 @@ CJK) so right borders align across rows.  Without it,
 measurement falls back to `string-width' — fine for ASCII but
 prone to a few-pixel drift on emoji-heavy tables."
   (agent-shell-with-work-buffer
-    (insert source)
+    ;; LOCAL-PATCH: streaming chunks tag SOURCE with UI text properties
+    ;; (line-prefix, wrap-prefix, field, read-only, agent-shell-ui-state,
+    ;; ...).  Left in place they leak into cell measurement (inflating
+    ;; widths of cells with fullwidth punctuation) and into the rendered
+    ;; output, misaligning table borders.  Strip them, keeping face /
+    ;; agent-shell-markdown-frozen / display which carry the actual
+    ;; markup styling.
+    (let ((source (copy-sequence source)))
+      (remove-text-properties
+       0 (length source)
+       '(line-prefix nil wrap-prefix nil field nil read-only nil
+         invisible nil help-echo nil agent-shell-ui-state nil
+         agent-shell-ui-section nil front-sticky nil rear-nonsticky nil)
+       source)
+      (insert source))
     ;; SOURCE inherits `field' text properties from the calling buffer
     ;; (e.g. agent-shell tags chars with `field output'); inter-row
     ;; `\\n's may carry different field values, which would otherwise
