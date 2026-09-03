@@ -368,6 +368,31 @@ it is still picked up by the bare-URL linkifier."
                   (agent-shell-markdown-convert "see ![alt](/no/such/file.png) end"))
                  '(("see ![alt](/no/such/file.png) end" nil)))))
 
+(ert-deftest agent-shell-markdown-convert-image-resolves-relative-to-caller-directory ()
+  ;; Regression: `agent-shell-markdown-convert' renders in a pooled work
+  ;; buffer (Emacs 31 `with-work-buffer'), which does not inherit the
+  ;; caller's `default-directory' the way `with-temp-buffer' does.  A
+  ;; relative image path then resolved against a stale directory from an
+  ;; earlier user and the image failed to render.
+  (let ((dir (file-name-as-directory (make-temp-file "agent-shell-test-" t))))
+    (unwind-protect
+        (let ((images-dir (expand-file-name "images" dir))
+              (image-file (expand-file-name "images/x.png" dir)))
+          (make-directory images-dir)
+          (write-region "" nil image-file)
+          (unwind-protect
+              (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _d) t))
+                        ((symbol-function 'image-supported-file-p) (lambda (_f) t))
+                        ((symbol-function 'create-image)
+                         (lambda (&rest _) '(image :type png :fake t)))
+                        ((symbol-function 'image-flush) (lambda (&rest _) nil)))
+                (let ((default-directory dir))
+                  (let ((rendered (agent-shell-markdown-convert "![alt](./images/x.png)")))
+                    (should (equal (substring-no-properties rendered) "alt"))
+                    (should (get-text-property 0 'display rendered)))))
+            (delete-directory images-dir t)))
+      (delete-directory dir t))))
+
 (ert-deftest agent-shell-markdown-convert-remote-image-falls-back-to-link ()
   ;; A remote image that can't be shown inline (no cache configured, and a
   ;; non-graphical display in batch) becomes a clickable link, not raw markup.
