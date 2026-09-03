@@ -77,6 +77,7 @@
 (require 'agent-shell-dnd)
 (require 'agent-shell-experimental)
 (require 'agent-shell-droid)
+(require 'agent-shell-godot)
 (require 'agent-shell-github)
 (require 'agent-shell-google)
 (require 'agent-shell-goose)
@@ -770,6 +771,7 @@ example filtering them.  See `agent-shell-agent-configs'."
         #'agent-shell-auggie-make-agent-config
         #'agent-shell-anthropic-make-claude-code-config
         #'agent-shell-codebuddy-make-agent-config
+        #'agent-shell-godot-make-agent-config
         #'agent-shell-cline-make-agent-config
         #'agent-shell-openai-make-codex-config
         #'agent-shell-cursor-make-agent-config
