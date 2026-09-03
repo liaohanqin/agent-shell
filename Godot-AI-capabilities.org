@@ -1,0 +1,81 @@
+#+TITLE: Godot AI 能力清单
+#+AUTHOR: agent-shell
+
+本文档整理 [[https://github.com/spardanviro/Godot_AI][spardanviro/Godot_AI]] 的设计思想，作为 =agent-shell= 后续增强
+Godot 专属能力时的参考蓝图。
+
+=spardanviro/Godot_AI= 是 Godot 4.7+ 的原生 C++ 模块（需重编译引擎），自带 UI
+与 agent 逻辑，与 =agent-shell= 是*替代而非互补*关系。但其功能清单完整覆盖了
+「AI 在编辑器内做游戏开发」所需的能力，值得逐项对照。本仓库走的是
+=Godot + MCP + 外部 agent= 路线（见 =agent-shell-godot.el=），能力对齐时应
+判断哪些由 MCP 工具提供、哪些可由 =agent-shell= 自身补足。
+
+* 能力清单
+
+| 能力 | Godot_AI 实现 | 对应本仓库方案 |
+|------+---------------+----------------|
+| 多供应商 LLM | Anthropic/OpenAI/Gemini/DeepSeek/GLM | 只走 CodeBuddy（MCP host） |
+| 代码生成与执行 | 解析回复提取 GDScript，包装成 =EditorScript= 执行 | 由 Godot MCP 工具承担 |
+| 危险调用拦截 | 拦截 =OS.execute= / =OS.shell_open= / =OS.kill= 等 | 依赖 agent-shell 权限 + MCP 侧限制 |
+| 场景感知上下文 | 场景树 / 选中节点 / 项目结构 / 打开脚本 | Godot MCP 的 scene/query 工具 |
+| 按需注入 API 文档 | 词边界匹配类名，注入 50+ 常用类参考 | 可做 prompt 增强（暂未实现） |
+| 按需注入 gotchas | 401 条 keyword 索引，命中才注入（省 ~90% token） | *值得借鉴*：见下 |
+| 域专用 prompt | UI/物理/导航/shader 等片段按需注入 | 可做 domain prompt（暂未实现） |
+| 权限系统 | 按操作类别 Allow/Ask/Deny，删除默认 deny | agent-shell 已有权限管线 |
+| Checkpoint 回滚 | 修改前建快照，可回退 | 可借 MCP 或 git 快照 |
+| 错误监控自恢复 | 捕获 AI 执行期错误，回喂自动重试（最多 3 次） | 可做（暂未实现） |
+| 上下文压缩 | 超长对话自动摘要 | 依赖 agent 自身能力 |
+| 资产生成 | OpenAI 图像 / TTS 生成 | 由 MCP 或外部工具承担 |
+
+* 最值得借鉴的两点
+
+**1. gotchas 按需注入（省 ~90% token）**
+
+Godot_AI 原方案曾把 3100 行静态 gotchas 每次全量注入，后来改成 401 条
+keyword 索引表，仅在用户消息命中关键词时注入相关条目（上限 ~3000 字符）。
+
+对 =agent-shell= 的启示：若将来做 Godot 专属 prompt 增强，不要静态塞进 system
+prompt，而是做关键词命中式的按需注入，避免无关上下文膨胀。
+
+**2. 错误监控的「AI 因果隔离」**
+
+Godot_AI 在 AI 触发的执行窗口内单独捕获错误，区分「AI 造成的错误」与「无关
+的控制台噪音」，只把前者回喂给模型重试。这避免了把引擎自身日志误当作失败。
+
+对 =agent-shell= 的启示：若做自动重试，需先做因果隔离，否则会把环境噪音回喂
+导致无效重试。
+
+* 暂不纳入的能力（明确不做）
+
+- 编辑器内 dock UI：=agent-shell= 的 UI 在 Emacs，不重复造 Godot 面板。
+- 多供应商切换：按需求只支持 CodeBuddy。
+- 引擎级重编译模块：走 MCP 路线，不侵入 Godot 源码。
+
+* 新项目接入清单
+
+对一个全新的 Godot 项目（非已配置过的项目），需要三件事就位才能打通链路：
+
+1. **装插件**（agent 可代做）：复制 =addons/godot_mcp/= 到新项目，并在
+   =project.godot= 追加 =[editor_plugins] enabled=PackedStringArray("godot_mcp")=。
+   这些步骤已固化进 =agent-shell-godot.el= 的 welcome message，启动 godot agent
+   后对它说「帮我安装 Godot MCP 插件」即可。
+2. **启用插件 + 重启**（仅 GUI，agent 不能代做）：Project → Project Settings →
+   Plugins → 勾选 "Godot MCP" → 重启编辑器。
+3. **启动 agent 会话**：=M-x agent-shell-godot-start-agent=，agent 自动拉起
+   =npx godot-mcp-server=。
+
+连接状态指示器位于*顶部工具栏*（非右上角），文字以 =MCP:= 为前缀：
+
+- 黄色 =MCP: Connecting...= — 启动中
+- 红色 =MCP: Disconnected= — 连不上 server（server 没跑）
+- 橙色 =MCP: No Agent= — server 已就绪，但无 agent 连接
+- 绿色 =MCP: Agent Active= / =MCP: Agents (N)= — agent 已连上
+
+*单实例限制*：一个 MCP server 同一时间只连一个 Godot 编辑器实例（WebSocket
+=127.0.0.1:6505=）。不要同时开两个项目的编辑器，否则会争抢同一端口。
+
+* 参考
+
+- [[https://github.com/spardanviro/Godot_AI][spardanviro/Godot_AI]] — 原生 C++ 模块（Godot 4.7+）
+- [[https://github.com/tomyud1/godot-mcp][tomyud1/godot-mcp]] — 本仓库接入的 MCP server（42 工具）
+- [[https://github.com/bradypp/godot-mcp][bradypp/godot-mcp]] — 备选 MCP server（Node/TS，偏运行/调试）

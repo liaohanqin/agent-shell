@@ -80,8 +80,15 @@ starting the CodeBuddy agent process."
   :type '(repeat string)
   :group 'agent-shell)
 
-(defun agent-shell-codebuddy-make-agent-config ()
+(cl-defun agent-shell-codebuddy-make-agent-config (&key mcp-servers welcome-function)
   "Create a CodeBuddy agent configuration.
+
+MCP-SERVERS, when non-nil, is passed through as the agent's
+`:mcp-servers', taking precedence over the global
+`agent-shell-mcp-servers'.  Same shape as that variable.
+
+WELCOME-FUNCTION, when non-nil, overrides the default
+`agent-shell-codebuddy--welcome-message'.
 
 Returns an agent configuration alist using `agent-shell-make-agent-config'."
   (agent-shell-make-agent-config
@@ -90,8 +97,10 @@ Returns an agent configuration alist using `agent-shell-make-agent-config'."
    :buffer-name "CodeBuddy"
    :shell-prompt "CodeBuddy> "
    :shell-prompt-regexp "CodeBuddy> "
+   :mcp-servers mcp-servers
    :icon-name "https://cnb.cool/codebuddy/codebuddy-code/-/git/raw/main/codebuddy-cat.png"
-   :welcome-function #'agent-shell-codebuddy--welcome-message
+   :welcome-function (or welcome-function
+                         #'agent-shell-codebuddy--welcome-message)
    :client-maker (lambda (buffer)
                    (agent-shell-codebuddy-make-client :buffer buffer))
    :install-instructions "Install the CodeBuddy CLI and ensure it supports ACP mode (for example, `codebuddy --acp`). See https://www.codebuddy.ai/docs/zh/ide/Getting-Started/Installation for installation."))
