@@ -37,10 +37,19 @@
 (defmacro agent-shell-with-work-buffer (&rest body)
   "Evaluate BODY in a temporary buffer, reusing one when possible.
 Expands to `with-work-buffer' when that macro is available at expansion
-time (Emacs 31 and later), otherwise to `with-temp-buffer'."
+time (Emacs 31 and later), otherwise to `with-temp-buffer'.
+
+A reused work buffer keeps whatever `default-directory' an earlier
+user left it (its locals are reset to the global default on release),
+so BODY would resolve relative file names against a stale directory.
+Mirror `with-temp-buffer' instead: evaluate BODY with the work
+buffer's `default-directory' set to the caller's."
   (declare (indent 0) (debug t))
   (if (fboundp 'with-work-buffer)
-      `(with-work-buffer ,@body)
+      `(let ((agent-shell-work-buffer-directory default-directory))
+         (with-work-buffer
+           (setq-local default-directory agent-shell-work-buffer-directory)
+           ,@body))
     `(with-temp-buffer ,@body)))
 
 (provide 'agent-shell-work-buffer)
