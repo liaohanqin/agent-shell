@@ -2328,6 +2328,34 @@ gains a blank line above and below it:
            (looking-at-p agent-shell-markdown--list-item-frontier-regexp)))
      start)))
 
+(defun agent-shell-markdown--table-source-complete-p (source)
+  "Return non-nil when every line of SOURCE is a complete table row.
+
+SOURCE is a table's stashed markdown (see
+`agent-shell-markdown--render-table'), possibly extended with
+freshly streamed text.  Rendering runs each line through
+`agent-shell-markdown--table-line-regexp', which needs the row's
+closing `|', so a row that is still streaming has no rendered
+form: `agent-shell-markdown--collect-table-rows' would drop it
+from the output -- and with it every line after.  Callers use
+this to hold such an extension back in the buffer instead of
+folding it into SOURCE, so the partial row can finish streaming
+\(and any state another pass or renderer put on it, e.g. a
+`agent-shell-markdown-frozen' inline span, survives) before it is
+rendered."
+  (let ((lines (split-string source "\n" nil))
+        (complete t))
+    ;; A trailing newline yields a final empty element that is not a
+    ;; row of its own.
+    (when (and lines (string-empty-p (car (last lines))))
+      (setq lines (butlast lines)))
+    (while (and complete lines)
+      (unless (string-match-p agent-shell-markdown--table-line-regexp
+                              (car lines))
+        (setq complete nil))
+      (setq lines (cdr lines)))
+    complete))
+
 (cl-defun agent-shell-markdown--find-tables (&key avoid-ranges)
   "Return tables to (re-)render in current buffer.
 
@@ -2411,10 +2439,21 @@ left untouched."
                 (let ((combined (concat stashed
                                         (buffer-substring rendered-end
                                                           trailing-end))))
-                  (push `((:start . ,pos)
-                          (:end . ,trailing-end)
-                          (:source . ,combined))
-                        tables)
+                  ;; Fold the extension only when it is all complete
+                  ;; rows.  A row that is still streaming (no closing
+                  ;; `|' yet) has no rendered form —
+                  ;; `agent-shell-markdown--collect-table-rows' would
+                  ;; drop it from the output while `--render-table'
+                  ;; already deleted it from the buffer, losing the
+                  ;; text and any state on it (e.g. a renderer's
+                  ;; frozen span).  Leave it in place so it folds once
+                  ;; it completes.
+                  (when (agent-shell-markdown--table-source-complete-p
+                         combined)
+                    (push `((:start . ,pos)
+                            (:end . ,trailing-end)
+                            (:source . ,combined))
+                          tables))
                   (setq pos trailing-end))
               ;; Nothing to fold — re-rendering unchanged source would
               ;; be a no-op, so skip past the rendered region.

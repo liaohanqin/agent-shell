@@ -3156,6 +3156,42 @@ returns (agent-shell-markdown-table agent-shell-markdown-table-zebra)."
 │ 2 │ Bob   │ Designer │ UK      │ Historical │
 "))))
 
+(ert-deftest agent-shell-markdown-table-holds-back-incomplete-continuation ()
+  ;; Regression: a chunk boundary that ends a streamed row mid-cell
+  ;; (no closing `|' yet) must not be folded into the rendered table.
+  ;; Folding deletes the text from the buffer while
+  ;; `agent-shell-markdown--collect-table-rows' drops the partial row
+  ;; from the output, so the text — and any state a pass or renderer
+  ;; put on it (here: a frozen span) — would be lost.  The row folds
+  ;; once it completes.
+  (with-temp-buffer
+    (insert "| A | B |
+|---|---|
+| 1 |")
+    (agent-shell-markdown-replace-markup)
+    ;; Chunk 2 ends mid-cell: the row has no closing `|' yet.
+    (goto-char (point-max))
+    (insert " tw")
+    (put-text-property (- (point-max) 2) (point-max)
+                       'agent-shell-markdown-frozen t)
+    (agent-shell-markdown-replace-markup)
+    ;; The partial continuation is still in the buffer, with its
+    ;; property, rather than folded away and dropped.
+    (should (string-match-p " tw" (buffer-string)))
+    (should (get-text-property (- (point-max) 2)
+                               'agent-shell-markdown-frozen))
+    ;; Chunk 3 completes the row (with its closing `|'): now it folds
+    ;; into the rendered table.
+    (goto-char (point-max))
+    (insert "o |
+")
+    (agent-shell-markdown-replace-markup)
+    (should (equal (substring-no-properties (buffer-string))
+                   "│ A │ B   │
+├───┼─────┤
+│ 1 │ two │
+"))))
+
 (ert-deftest agent-shell-markdown-table-inside-open-fence-stays-raw ()
   ;; A table inside a fenced block whose closing fence hasn't
   ;; streamed in yet must NOT get table-rendered.  Otherwise the
