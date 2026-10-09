@@ -54,6 +54,7 @@
 (declare-function agent-shell--shell-buffer "agent-shell")
 (declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell--prompt-queue-echo "agent-shell-prompt-queue")
+(declare-function agent-shell--realign-on-change "agent-shell")
 (declare-function agent-shell--filter-buffer-substring "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-goto-last-interaction "agent-shell")
@@ -426,6 +427,15 @@ Optionally set its PROMPT and RESPONSE."
     ;; `agent-shell-viewport-refresh' on switch) leave the header showing
     ;; the previously-rendered position.
     (agent-shell-viewport--update-header)
+    ;; The response above is the shell buffer's already-rendered text,
+    ;; so any table in it carries the layout (and the window width it
+    ;; was measured against) from wherever it was rendered, possibly a
+    ;; different window or none at all.  Replacing a displayed buffer's
+    ;; content is not a window change, so the realign hooks don't fire
+    ;; for it: schedule a re-layout against this viewport's window, or
+    ;; a stale table stays misaligned until some unrelated resize.
+    (when-let* ((window (get-buffer-window (current-buffer) t)))
+      (agent-shell--realign-on-change window))
     ;; TODO: Render prompt markdown?
     ))
 
