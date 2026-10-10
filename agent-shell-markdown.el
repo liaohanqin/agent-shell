@@ -699,6 +699,95 @@ bold `let vs let*', still stashing `**let vs let\\***' for copy."
                       (point) 'agent-shell-markdown-escaped nil (point-max))
                      (point-max))))))
 
+(defconst agent-shell-markdown--emphasis-ascii-punctuation
+  (string-to-list "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~")
+  "ASCII punctuation chars, for emphasis flanking.
+CommonMark's flanking rules ask whether a character is
+punctuation; the syntax table can't be trusted for that (`!' is a
+symbol constituent in some tables), so ASCII is judged against
+this set.  Non-ASCII chars follow the syntax table, whose `.`
+class CJK punctuation (e.g. `，') carries.")
+
+(defun agent-shell-markdown--emphasis-whitespace-p (char)
+  "Non-nil when CHAR counts as whitespace for emphasis flanking.
+Nil CHAR (the accessible portion's edge, i.e. a line boundary)
+counts as whitespace, as it does in CommonMark."
+  (or (null char)
+      (memq char '(?\s ?\t ?\n ?\r ?\f ?\v))))
+
+(defun agent-shell-markdown--emphasis-punctuation-p (char)
+  "Non-nil when CHAR counts as punctuation for emphasis flanking."
+  (and char
+       (if (< char 128)
+           (memq char agent-shell-markdown--emphasis-ascii-punctuation)
+         (eq (char-syntax char) ?.))))
+
+(defun agent-shell-markdown--emphasis-delimiter-run (start end)
+  "Expand START..END over adjacent copies of its delimiter char.
+Returns the (BEG . END) of the maximal run, since emphasis flanks
+are judged against the whole run, per CommonMark."
+  (let ((char (char-after start)))
+    (while (and (> start (point-min))
+                (eq (char-after (1- start)) char))
+      (setq start (1- start)))
+    (while (and (< end (point-max))
+                (eq (char-after end) char))
+      (setq end (1+ end)))
+    (cons start end)))
+
+(defun agent-shell-markdown--emphasis-flanking-p (run)
+  "Return (OPEN . CLOSE) flanking flags for delimiter RUN (BEG . END).
+OPEN is non-nil when the run is left-flanking and so may open
+emphasis; CLOSE is non-nil when it is right-flanking and may
+close it."
+  (let* ((after (and (< (cdr run) (point-max)) (char-after (cdr run))))
+         (before (and (> (car run) (point-min))
+                      (char-after (1- (car run)))))
+         (after-ws (agent-shell-markdown--emphasis-whitespace-p after))
+         (before-ws (agent-shell-markdown--emphasis-whitespace-p before))
+         (after-punct (agent-shell-markdown--emphasis-punctuation-p after))
+         (before-punct (agent-shell-markdown--emphasis-punctuation-p before)))
+    (cons (and (not after-ws)
+               (or (not after-punct) before-ws before-punct))
+          (and (not before-ws)
+               (or (not before-punct) after-ws after-punct)))))
+
+(defun agent-shell-markdown--emphasis-valid-p (start end length underscore)
+  "Non-nil when delimiters of LENGTH chars around START..END are valid emphasis.
+
+START is the first char of the opening delimiter and END one past
+the last char of the closing one.  Delimiters are judged on their
+maximal run by CommonMark's flanking rules, so markup glued to CJK
+text (e.g. `公式**直接定义**，') still emphasizes, while a lone
+delimiter in \"a * b *\" stays literal.  A single-char delimiter
+may only come from an odd-length run, so `**world**' is strong,
+not `*world*' plus leftovers.  UNDERSCORE non-nil for `_'
+delimiters, which follow CommonMark's extra rule that they may not
+join word characters, keeping `snake_case' literal."
+  (let* ((open-run (agent-shell-markdown--emphasis-delimiter-run
+                    start (+ start length)))
+         (close-run (agent-shell-markdown--emphasis-delimiter-run
+                     (- end length) end))
+         (open (agent-shell-markdown--emphasis-flanking-p open-run))
+         (close (agent-shell-markdown--emphasis-flanking-p close-run)))
+    (and (or (/= length 1)
+             (and (= 1 (logand (- (cdr open-run) (car open-run)) 1))
+                  (= 1 (logand (- (cdr close-run) (car close-run)) 1))))
+         (if underscore
+             (and (car open)
+                  (or (not (cdr open))
+                      (agent-shell-markdown--emphasis-punctuation-p
+                       (and (> (car open-run) (point-min))
+                            (char-after (1- (car open-run)))))))
+           (car open))
+         (if underscore
+             (and (cdr close)
+                  (or (not (car close))
+                      (agent-shell-markdown--emphasis-punctuation-p
+                       (and (< (cdr close-run) (point-max))
+                            (char-after (cdr close-run))))))
+           (cdr close)))))
+
 (cl-defun agent-shell-markdown--replace-bolds (&key avoid-ranges)
   "Replace `**X**' / `__X__' spans in current buffer with bold X.
 
@@ -708,17 +797,21 @@ properties.  Spans that fall inside or reach into any of AVOID-RANGES
 are left untouched.  Returns non-nil if at least one replacement was
 made.
 
+Delimiters must flank their content as in CommonMark (see
+`agent-shell-markdown--emphasis-valid-p'), so markup next to CJK
+text (e.g. `公式**直接定义**，') is bold while lone asterisks stay
+literal.  `__X__' additionally may not sit inside a word, keeping
+`snake_case' literal.
+
 For example, the buffer \"hello **world**.\" becomes \"hello
 world.\" with face `agent-shell-markdown-bold' on \"world\"."
   (let ((case-fold-search nil)
         (changed nil))
     (goto-char (point-min))
     (while (re-search-forward
-            (rx (or line-start (syntax whitespace))
-                (group
+            (rx (group
                  (or (seq "**" (group (one-or-more (not (any "\n*")))) "**")
-                     (seq "__" (group (one-or-more (not (any "\n_")))) "__")))
-                (or (syntax punctuation) (syntax whitespace) line-end))
+                     (seq "__" (group (one-or-more (not (any "\n_")))) "__"))))
             nil t)
       (let* ((markup-start (match-beginning 1))
              (markup-end (match-end 1))
@@ -727,6 +820,10 @@ world.\" with face `agent-shell-markdown-bold' on \"world\"."
         (cond
          (avoid
           (goto-char (cdr avoid)))
+         ((not (agent-shell-markdown--emphasis-valid-p
+                markup-start markup-end 2
+                (eq (char-after markup-start) ?_)))
+          (goto-char (1+ markup-start)))
          ((agent-shell-markdown--straddles-avoid-range-p
            markup-start markup-end avoid-ranges)
           (goto-char (1+ markup-start)))
@@ -747,13 +844,15 @@ Markup characters are deleted; remaining inner text carries face
 properties.  Spans that fall inside any of AVOID-RANGES are left
 untouched.  Returns non-nil if at least one replacement was made.
 
-A `_X_' span must be followed by punctuation, whitespace, or a line
-end, so intraword underscores such as \"_hello_world\" are left as
-literal text rather than emphasized.  X may not start or end with
-whitespace, so a lone delimiter like the one in \"a * b *\" stays
-literal, as in CommonMark.  Spans reaching into an AVOID-RANGES
-entry (e.g. ending on the `*' of \"* and `*`\") are left alone too,
-since code spans bind tighter than emphasis.
+Delimiters must flank their content as in CommonMark (see
+`agent-shell-markdown--emphasis-valid-p'), so markup next to CJK
+text (e.g. `这是*重点*内容') is italic while a lone delimiter like
+the one in \"a * b *\" stays literal.  A `_X_' span additionally
+may not join word characters, so intraword underscores such as
+\"_hello_world\" are left as literal text rather than emphasized.
+X may not start or end with whitespace.  Spans reaching into an
+AVOID-RANGES entry (e.g. ending on the `*' of \"* and `*`\") are
+left alone too, since code spans bind tighter than emphasis.
 
 For example, the buffer \"hello *world*.\" becomes \"hello
 world.\" with face `agent-shell-markdown-italic' on \"world\"."
@@ -761,19 +860,16 @@ world.\" with face `agent-shell-markdown-italic' on \"world\"."
         (changed nil))
     (goto-char (point-min))
     (while (re-search-forward
-            (rx (or (seq (or bol (one-or-more (any "\n \t")))
-                         (group "*"
-                                (group (not (any "\n\t *"))
-                                       (optional (zero-or-more (not (any "\n*")))
-                                                 (not (any "\n\t *"))))
-                                "*"))
-                    (seq (or bol (one-or-more (any "\n \t")))
-                         (group "_"
-                                (group (not (any "\n\t _"))
-                                       (optional (zero-or-more (not (any "\n_")))
-                                                 (not (any "\n\t _"))))
-                                "_")
-                         (or (syntax punctuation) (syntax whitespace) line-end))))
+            (rx (or (group "*"
+                           (group (not (any "\n\t *"))
+                                  (optional (zero-or-more (not (any "\n*")))
+                                            (not (any "\n\t *"))))
+                           "*")
+                    (group "_"
+                           (group (not (any "\n\t _"))
+                                  (optional (zero-or-more (not (any "\n_")))
+                                            (not (any "\n\t _"))))
+                           "_")))
             nil t)
       (let* ((markup-start (or (match-beginning 1) (match-beginning 3)))
              (markup-end (or (match-end 1) (match-end 3)))
@@ -782,6 +878,10 @@ world.\" with face `agent-shell-markdown-italic' on \"world\"."
         (cond
          (avoid
           (goto-char (cdr avoid)))
+         ((not (agent-shell-markdown--emphasis-valid-p
+                markup-start markup-end 1
+                (eq (char-after markup-start) ?_)))
+          (goto-char (1+ markup-start)))
          ((agent-shell-markdown--straddles-avoid-range-p
            markup-start markup-end avoid-ranges)
           (goto-char (1+ markup-start)))

@@ -28,6 +28,26 @@
                  '(("hello " nil)
                    ("world" (agent-shell-markdown-bold))))))
 
+(ert-deftest agent-shell-markdown-convert-bold-cjk-adjacent ()
+  ;; Delimiters glued to CJK text flank as in CommonMark: `**' after a
+  ;; han character and before a fullwidth comma is left- and
+  ;; right-flanking, so the span is bold rather than literal markup.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert
+                   "用归一化权重公式**直接定义**，插值性质是构造保证的"))
+                 '(("用归一化权重公式" nil)
+                   ("直接定义" (agent-shell-markdown-bold))
+                   ("，插值性质是构造保证的" nil)))))
+
+(ert-deftest agent-shell-markdown-convert-bold-intraword ()
+  ;; Asterisks may open and close inside a word, as in CommonMark
+  ;; (unlike underscores, see the intraword `_' tests).
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "foo**bar**baz"))
+                 '(("foo" nil)
+                   ("bar" (agent-shell-markdown-bold))
+                   ("baz" nil)))))
+
 (ert-deftest agent-shell-markdown-escaped-asterisk-in-bold ()
   ;; Regression: `**let vs let\\***' is bold text ending in an escaped
   ;; literal `*' (CommonMark).  The escape lets the bold span match and
@@ -133,6 +153,22 @@
                   (agent-shell-markdown-convert "Echo _hello_world"))
                  '(("Echo _hello_world" nil)))))
 
+(ert-deftest agent-shell-markdown-convert-italic-cjk-adjacent ()
+  ;; A `*' pair glued to CJK text is left- and right-flanking, so the
+  ;; span is italic.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "这是*重点*内容"))
+                 '(("这是" nil)
+                   ("重点" (agent-shell-markdown-italic))
+                   ("内容" nil)))))
+
+(ert-deftest agent-shell-markdown-convert-italic-underscore-cjk-intraword ()
+  ;; `_' may not join word characters, CJK included: this stays
+  ;; literal just as `snake_case' does.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "变量_名称_后缀"))
+                 '(("变量_名称_后缀" nil)))))
+
 (ert-deftest agent-shell-markdown-convert-italic-lone-asterisks ()
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "a * b * c"))
@@ -201,7 +237,9 @@
 (ert-deftest agent-shell-markdown-convert-bold-wrapping-italic ()
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "**_my text_**"))
-                 '(("my text" (agent-shell-markdown-italic agent-shell-markdown-bold))))))
+                 ;; Faces list in application order: the inner `_' pair
+                 ;; matches first, the outer `**' pair after it.
+                 '(("my text" (agent-shell-markdown-bold agent-shell-markdown-italic))))))
 
 (ert-deftest agent-shell-markdown-convert-bold-with-inner-italic ()
   (should (equal (agent-shell-markdown--deconstruct
@@ -254,7 +292,9 @@
 (ert-deftest agent-shell-markdown-convert-strikethrough-wrapping-bold ()
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "~~**bold-strike**~~"))
-                 '(("bold-strike" (agent-shell-markdown-bold agent-shell-markdown-strikethrough))))))
+                 ;; Faces list in application order: `**' matches first,
+                 ;; `~~' after it.
+                 '(("bold-strike" (agent-shell-markdown-strikethrough agent-shell-markdown-bold))))))
 
 (ert-deftest agent-shell-markdown-convert-header-level-1 ()
   ;; Header rendering requires a trailing newline to complete; an
@@ -444,12 +484,12 @@ it is still picked up by the bare-URL linkifier."
     ;; The label is left as prose rather than becoming a link title.
     (should-not (get-text-property 5 'agent-shell-markdown-url rendered))))
 
-(ert-deftest agent-shell-markdown-convert-link-with-bold-inside-untouched ()
-  ;; Bold inside link title is left literal (mirrors markdown-overlays:
-  ;; bold regex requires whitespace/BOL before `**', and `[' isn't either).
+(ert-deftest agent-shell-markdown-convert-link-with-bold-inside ()
+  ;; Bold inside a link title renders, as in CommonMark; the link pass
+  ;; runs after emphasis and still recognises `[bold](url)'.
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "[**bold**](url)"))
-                 '(("**bold**" (agent-shell-markdown-link))))))
+                 '(("bold" (agent-shell-markdown-link agent-shell-markdown-bold))))))
 
 (ert-deftest agent-shell-markdown-convert-link-after-image-not-confused ()
   ;; `[X](Y)' inside `![X](Y)' must not be treated as a link.
