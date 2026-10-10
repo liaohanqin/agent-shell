@@ -482,7 +482,7 @@ block is left as literal text."
                                       :avoid-ranges avoid-ranges)))
                  (or italic-changed bold-changed strike-changed)))
         (agent-shell-markdown--replace-headers :avoid-ranges avoid-ranges
-                                             :complete (or force complete))
+                                               :complete (or force complete))
         (agent-shell-markdown--style-inline-code :avoid-ranges source-ranges)
         (agent-shell-markdown--replace-links :avoid-ranges avoid-ranges
                                              :tracking-file tracking-file)
@@ -507,7 +507,7 @@ block is left as literal text."
          :inline-ranges inline-ranges)
         (agent-shell-markdown--style-dividers :avoid-ranges avoid-ranges)
         (agent-shell-markdown--style-blockquotes :avoid-ranges avoid-ranges
-                                                :complete (or force complete))
+                                                 :complete (or force complete))
         (agent-shell-markdown--style-lists :avoid-ranges avoid-ranges
                                            :complete (or force complete))
         (agent-shell-markdown--style-source-blocks
@@ -831,7 +831,7 @@ world.\" with face `agent-shell-markdown-bold' on \"world\"."
           (goto-char (cdr avoid)))
          ((agent-shell-markdown--straddles-avoid-range-p
            markup-start markup-end avoid-ranges)
-           (goto-char (1+ markup-start)))
+          (goto-char (1+ markup-start)))
          ((not (and (agent-shell-markdown--emphasis-delimiter-p
                      :position markup-start :length 2 :opening t)
                     (agent-shell-markdown--emphasis-delimiter-p
@@ -1852,175 +1852,175 @@ with `emacs-lisp-mode' face properties on the body and a
                 ;; Honor `agent-shell-markdown-frozen'.
                 ((not (get-text-property open-start 'agent-shell-markdown-frozen)))
                 ((not (get-text-property open-end 'agent-shell-markdown-frozen))))
-        (let* ((lang (map-elt block :language))
-               (body-start (copy-marker open-end))
-               (body-end (copy-marker (1- close-start)))
-               (source (buffer-substring-no-properties open-start close-end))
-               (highlighted (when highlight-blocks
-                              (agent-shell-markdown--highlight-code
-                               (buffer-substring-no-properties body-start body-end)
-                               lang))))
-          ;; Delete in reverse position order so earlier offsets stay
-          ;; valid; body markers adjust automatically.
-          (delete-region close-start close-end)
-          (delete-region open-start open-end)
-          ;; Seed the bg panel on body chars first, then layer language
-          ;; font-lock faces on top — the foreground colors take priority
-          ;; per glyph while the `:extend t' background fills the gaps
-          ;; and reaches the right edge of the window.  Include the
-          ;; trailing `\\n' (the one that sat between body and close
-          ;; fence, preserved by the deletes above): `:extend t' only
-          ;; extends the background when the face is in effect at
-          ;; end-of-line, so without the `\\n' carrying the face the
-          ;; last body line's bg would stop at the last content char.
-          (let ((body-bg-end (min (1+ (marker-position body-end))
-                                  (point-max)))
-                ;; `line-prefix' / `wrap-prefix' visually inset each
-                ;; rendered line: 2 plain cols then 2 bg-tinted cols.
-                ;; Copying chars out of the block yanks raw source with
-                ;; no leading indentation.  `wrap-prefix' handles long
-                ;; lines that wrap.  Splitting the prefix this way keeps
-                ;; the panel from running hard to the window's left edge
-                ;; while still drawing a clear tinted gutter.
-                (prefix (concat "  "
-                                (propertize
-                                 "  " 'face
-                                 'agent-shell-markdown-source-block))))
-            (put-text-property (marker-position body-start) body-bg-end
-                               'face 'agent-shell-markdown-source-block)
-            (agent-shell-markdown--apply-faces-from highlighted
-                                                    (marker-position body-start))
-            (add-text-properties (marker-position body-start) body-bg-end
-                                 `(agent-shell-markdown-frozen t
-                                                               agent-shell-non-trimmable t
-                                                               rear-nonsticky (agent-shell-markdown-frozen
-                                                                               agent-shell-non-trimmable)
-                                                               line-prefix ,prefix
-                                                               wrap-prefix ,prefix))
-            ;; Insert an actionable "LANG ⧉" / "snippet ⧉" label and the
-            ;; surrounding panel padding as REAL BUFFER TEXT — no
-            ;; `display' properties (which previously caused the body's
-            ;; first char to be hidden / clipped, see #597 "Make code
-            ;; block label actual buffer text"), no overlays.  Layout
-            ;; relative to the original body: `<vpad>\\n<label>\\n\\n
-            ;; <body>\\n<vpad>\\n', where each padding `\\n' carries the
-            ;; panel bg face so its line renders as a tinted blank line.
-            ;; RET or mouse-1 on the label kills the body to the kill
-            ;; ring.  `content-start' uses insertion-type t so it stays
-            ;; AFTER the inserted prefix, giving the kill-action a
-            ;; stable pointer to body content even though `body-start'
-            ;; itself collapses to the leading vpad's first char.
-            ;; After insertion we carry the body's caller-set properties
-            ;; (`invisible', agent-shell-ui block/section markers,
-            ;; `read-only', etc.) onto the inserted chars — propertize'd
-            ;; inserts ignore stickiness, and without this the inserted
-            ;; prefix punches a hole in the caller's contiguous block
-            ;; range and breaks toggle/replace operations.
-            (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
-                                       " "
-                                       ;; Tag the copy glyph so item
-                                       ;; navigation can land on the
-                                       ;; affordance itself (see
-                                       ;; `agent-shell-markdown--next-visible-source-block').
-                                       (propertize
-                                        "⧉"
-                                        'agent-shell-markdown-source-block-copy t)))
-                   (content-start (copy-marker (marker-position body-start) t))
-                   (kill-action (lambda ()
-                                  (interactive)
-                                  ;; Locate the body by text property in
-                                  ;; the current buffer so copy works in
-                                  ;; any buffer that received a propertized
-                                  ;; copy of the rendered block (e.g. the
-                                  ;; viewport).
-                                  (when-let* ((start (next-single-property-change
-                                                      (point)
-                                                      'agent-shell-markdown-source-block-body))
-                                              ((get-text-property
-                                                start
-                                                'agent-shell-markdown-source-block-body))
-                                              (end (next-single-property-change
-                                                    start
-                                                    'agent-shell-markdown-source-block-body)))
-                                    (kill-new (buffer-substring-no-properties start end))
-                                    (message "Copied"))))
-                   (label-map (agent-shell-markdown--make-ret-binding-map
-                               kill-action))
-                   (vpad-line (propertize "\n"
-                                          'face 'agent-shell-markdown-source-block
-                                          'line-prefix prefix
-                                          'wrap-prefix prefix
-                                          'agent-shell-non-trimmable t
-                                          'rear-nonsticky
-                                          '(agent-shell-non-trimmable)))
-                   (label (propertize
-                           label-text
-                           'face 'agent-shell-markdown-source-block-language
-                           'pointer 'hand
-                           'keymap label-map
-                           'cursor-sensor-functions
-                           (agent-shell-markdown--make-hint-sensor
-                            (lambda ()
-                              (agent-shell-markdown--action-hint
-                               :action kill-action
-                               :keymap label-map
-                               :verb "copy")))
-                           'agent-shell-markdown-frozen t
-                           ;; `cursor-sensor-functions' included so the
-                           ;; hint stops at the label rather than showing
-                           ;; on the character after it.
-                           'rear-nonsticky '(agent-shell-markdown-frozen
-                                             cursor-sensor-functions)
-                           'line-prefix prefix
-                           'wrap-prefix prefix))
-                   ;; Top vpad `\\n' + label + middle vpad `\\n' + a
-                   ;; second `\\n' that becomes the first column of the
-                   ;; line carrying body content.
-                   (header (concat vpad-line label vpad-line vpad-line))
-                   (carried (agent-shell-markdown--carry-properties body-start)))
-              (goto-char body-start)
-              (insert header)
-              (when carried
-                (add-text-properties (marker-position body-start)
-                                     (marker-position content-start)
-                                     carried))
-              ;; Tag body content so the label's copy action can locate
-              ;; it by text property, survives a propertized copy into
-              ;; another buffer (e.g. viewport).
+      (let* ((lang (map-elt block :language))
+             (body-start (copy-marker open-end))
+             (body-end (copy-marker (1- close-start)))
+             (source (buffer-substring-no-properties open-start close-end))
+             (highlighted (when highlight-blocks
+                            (agent-shell-markdown--highlight-code
+                             (buffer-substring-no-properties body-start body-end)
+                             lang))))
+        ;; Delete in reverse position order so earlier offsets stay
+        ;; valid; body markers adjust automatically.
+        (delete-region close-start close-end)
+        (delete-region open-start open-end)
+        ;; Seed the bg panel on body chars first, then layer language
+        ;; font-lock faces on top — the foreground colors take priority
+        ;; per glyph while the `:extend t' background fills the gaps
+        ;; and reaches the right edge of the window.  Include the
+        ;; trailing `\\n' (the one that sat between body and close
+        ;; fence, preserved by the deletes above): `:extend t' only
+        ;; extends the background when the face is in effect at
+        ;; end-of-line, so without the `\\n' carrying the face the
+        ;; last body line's bg would stop at the last content char.
+        (let ((body-bg-end (min (1+ (marker-position body-end))
+                                (point-max)))
+              ;; `line-prefix' / `wrap-prefix' visually inset each
+              ;; rendered line: 2 plain cols then 2 bg-tinted cols.
+              ;; Copying chars out of the block yanks raw source with
+              ;; no leading indentation.  `wrap-prefix' handles long
+              ;; lines that wrap.  Splitting the prefix this way keeps
+              ;; the panel from running hard to the window's left edge
+              ;; while still drawing a clear tinted gutter.
+              (prefix (concat "  "
+                              (propertize
+                               "  " 'face
+                               'agent-shell-markdown-source-block))))
+          (put-text-property (marker-position body-start) body-bg-end
+                             'face 'agent-shell-markdown-source-block)
+          (agent-shell-markdown--apply-faces-from highlighted
+                                                  (marker-position body-start))
+          (add-text-properties (marker-position body-start) body-bg-end
+                               `(agent-shell-markdown-frozen t
+                                                             agent-shell-non-trimmable t
+                                                             rear-nonsticky (agent-shell-markdown-frozen
+                                                                             agent-shell-non-trimmable)
+                                                             line-prefix ,prefix
+                                                             wrap-prefix ,prefix))
+          ;; Insert an actionable "LANG ⧉" / "snippet ⧉" label and the
+          ;; surrounding panel padding as REAL BUFFER TEXT — no
+          ;; `display' properties (which previously caused the body's
+          ;; first char to be hidden / clipped, see #597 "Make code
+          ;; block label actual buffer text"), no overlays.  Layout
+          ;; relative to the original body: `<vpad>\\n<label>\\n\\n
+          ;; <body>\\n<vpad>\\n', where each padding `\\n' carries the
+          ;; panel bg face so its line renders as a tinted blank line.
+          ;; RET or mouse-1 on the label kills the body to the kill
+          ;; ring.  `content-start' uses insertion-type t so it stays
+          ;; AFTER the inserted prefix, giving the kill-action a
+          ;; stable pointer to body content even though `body-start'
+          ;; itself collapses to the leading vpad's first char.
+          ;; After insertion we carry the body's caller-set properties
+          ;; (`invisible', agent-shell-ui block/section markers,
+          ;; `read-only', etc.) onto the inserted chars — propertize'd
+          ;; inserts ignore stickiness, and without this the inserted
+          ;; prefix punches a hole in the caller's contiguous block
+          ;; range and breaks toggle/replace operations.
+          (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
+                                     " "
+                                     ;; Tag the copy glyph so item
+                                     ;; navigation can land on the
+                                     ;; affordance itself (see
+                                     ;; `agent-shell-markdown--next-visible-source-block').
+                                     (propertize
+                                      "⧉"
+                                      'agent-shell-markdown-source-block-copy t)))
+                 (content-start (copy-marker (marker-position body-start) t))
+                 (kill-action (lambda ()
+                                (interactive)
+                                ;; Locate the body by text property in
+                                ;; the current buffer so copy works in
+                                ;; any buffer that received a propertized
+                                ;; copy of the rendered block (e.g. the
+                                ;; viewport).
+                                (when-let* ((start (next-single-property-change
+                                                    (point)
+                                                    'agent-shell-markdown-source-block-body))
+                                            ((get-text-property
+                                              start
+                                              'agent-shell-markdown-source-block-body))
+                                            (end (next-single-property-change
+                                                  start
+                                                  'agent-shell-markdown-source-block-body)))
+                                  (kill-new (buffer-substring-no-properties start end))
+                                  (message "Copied"))))
+                 (label-map (agent-shell-markdown--make-ret-binding-map
+                             kill-action))
+                 (vpad-line (propertize "\n"
+                                        'face 'agent-shell-markdown-source-block
+                                        'line-prefix prefix
+                                        'wrap-prefix prefix
+                                        'agent-shell-non-trimmable t
+                                        'rear-nonsticky
+                                        '(agent-shell-non-trimmable)))
+                 (label (propertize
+                         label-text
+                         'face 'agent-shell-markdown-source-block-language
+                         'pointer 'hand
+                         'keymap label-map
+                         'cursor-sensor-functions
+                         (agent-shell-markdown--make-hint-sensor
+                          (lambda ()
+                            (agent-shell-markdown--action-hint
+                             :action kill-action
+                             :keymap label-map
+                             :verb "copy")))
+                         'agent-shell-markdown-frozen t
+                         ;; `cursor-sensor-functions' included so the
+                         ;; hint stops at the label rather than showing
+                         ;; on the character after it.
+                         'rear-nonsticky '(agent-shell-markdown-frozen
+                                           cursor-sensor-functions)
+                         'line-prefix prefix
+                         'wrap-prefix prefix))
+                 ;; Top vpad `\\n' + label + middle vpad `\\n' + a
+                 ;; second `\\n' that becomes the first column of the
+                 ;; line carrying body content.
+                 (header (concat vpad-line label vpad-line vpad-line))
+                 (carried (agent-shell-markdown--carry-properties body-start)))
+            (goto-char body-start)
+            (insert header)
+            (when carried
+              (add-text-properties (marker-position body-start)
+                                   (marker-position content-start)
+                                   carried))
+            ;; Tag body content so the label's copy action can locate
+            ;; it by text property, survives a propertized copy into
+            ;; another buffer (e.g. viewport).
+            (put-text-property (marker-position content-start)
+                               (marker-position body-end)
+                               'agent-shell-markdown-source-block-body t)
+            ;; Bottom vpad: insert a single tinted `\\n' AFTER the
+            ;; body's trailing newline so the panel ends on a blank
+            ;; tinted line below the last body line.  body-end
+            ;; (insertion-type nil) stays put across this insert; the
+            ;; vpad lives at [body-end, body-end+1) within the buffer.
+            (let ((panel-bottom (marker-position body-end)))
+              (save-excursion
+                (when (and (< (marker-position body-end) (point-max))
+                           (eq (char-after (marker-position body-end)) ?\n))
+                  (goto-char (1+ (marker-position body-end)))
+                  (let ((vpad-start (point)))
+                    (insert vpad-line)
+                    (when carried
+                      (add-text-properties vpad-start (point) carried))
+                    (setq panel-bottom (point)))))
+              ;; The inserted panel chrome (language label, copy icon,
+              ;; padding) is not markdown, so give it an empty source: a
+              ;; selection that contains it reconstructs to nothing
+              ;; rather than leaking e.g. "python ⧉".  The body content
+              ;; carries the fenced source.
+              (put-text-property (marker-position body-start) panel-bottom
+                                 'agent-shell-markdown-source "")
               (put-text-property (marker-position content-start)
                                  (marker-position body-end)
-                                 'agent-shell-markdown-source-block-body t)
-              ;; Bottom vpad: insert a single tinted `\\n' AFTER the
-              ;; body's trailing newline so the panel ends on a blank
-              ;; tinted line below the last body line.  body-end
-              ;; (insertion-type nil) stays put across this insert; the
-              ;; vpad lives at [body-end, body-end+1) within the buffer.
-              (let ((panel-bottom (marker-position body-end)))
-                (save-excursion
-                  (when (and (< (marker-position body-end) (point-max))
-                             (eq (char-after (marker-position body-end)) ?\n))
-                    (goto-char (1+ (marker-position body-end)))
-                    (let ((vpad-start (point)))
-                      (insert vpad-line)
-                      (when carried
-                        (add-text-properties vpad-start (point) carried))
-                      (setq panel-bottom (point)))))
-                ;; The inserted panel chrome (language label, copy icon,
-                ;; padding) is not markdown, so give it an empty source: a
-                ;; selection that contains it reconstructs to nothing
-                ;; rather than leaking e.g. "python ⧉".  The body content
-                ;; carries the fenced source.
-                (put-text-property (marker-position body-start) panel-bottom
-                                   'agent-shell-markdown-source "")
-                (put-text-property (marker-position content-start)
-                                   (marker-position body-end)
-                                   'agent-shell-markdown-source source)
-                ;; Tag the whole block (top vpad through bottom vpad) so
-                ;; `--pad-source-blocks' can find it.  `body-start' has
-                ;; collapsed to the block's top after the header insert
-                ;; above.
-                (put-text-property (marker-position body-start) panel-bottom
-                                   'agent-shell-markdown-source-block-rendered t))))))))
+                                 'agent-shell-markdown-source source)
+              ;; Tag the whole block (top vpad through bottom vpad) so
+              ;; `--pad-source-blocks' can find it.  `body-start' has
+              ;; collapsed to the block's top after the header insert
+              ;; above.
+              (put-text-property (marker-position body-start) panel-bottom
+                                 'agent-shell-markdown-source-block-rendered t))))))))
 
 (defconst agent-shell-markdown--table-line-regexp
   (rx line-start
@@ -2196,9 +2196,9 @@ reconstructing to `- [x] Done'."
     (add-text-properties
      line-start (marker-position end)
      '(agent-shell-markdown-frozen t
-       agent-shell-markdown-list-rendered t
-       rear-nonsticky (agent-shell-markdown-frozen
-                       agent-shell-markdown-list-rendered)))
+                                   agent-shell-markdown-list-rendered t
+                                   rear-nonsticky (agent-shell-markdown-frozen
+                                                   agent-shell-markdown-list-rendered)))
     (set-marker end nil)
     (set-marker content-end nil)))
 
@@ -2442,11 +2442,11 @@ in place of the gap's newline)."
       (add-text-properties start (point) carried))
     (remove-text-properties start (point)
                             '(display nil
-                              font-lock-face nil
-                              line-prefix nil
-                              wrap-prefix nil
-                              agent-shell-markdown-source-block-rendered nil
-                              agent-shell-markdown-list-rendered nil))))
+                                      font-lock-face nil
+                                      line-prefix nil
+                                      wrap-prefix nil
+                                      agent-shell-markdown-source-block-rendered nil
+                                      agent-shell-markdown-list-rendered nil))))
 
 (defun agent-shell-markdown--frame-block (start end continues-p)
   "Frame the rendered block spanning [START, END) with blank lines.
@@ -3166,7 +3166,7 @@ tall comes back 20x20."
             (remove-text-properties
              pos end
              '(agent-shell-markdown-image-width-ratio nil
-               agent-shell-markdown-image-window-width nil)
+                                                      agent-shell-markdown-image-window-width nil)
              result)
             (setq pos (text-property-not-all
                        end (length result)
@@ -3505,6 +3505,17 @@ allocated narrower than its natural total, see
             (setq col (1+ col))))))
     min-widths))
 
+(defvar-local agent-shell-markdown--tables-rendered nil
+  "Markers at tables rendered since the last `rerender-tables'.
+`agent-shell-markdown--render-table' records each render here.  The
+next `agent-shell-markdown-rerender-tables' re-lays those tables out
+even when their stored width matches the display, since a render
+that happened while streaming can leave rows on layouts from
+different widths (and content can shift under tables between
+renders), which the width check alone can't detect.  Cleared by that
+re-layout, so it never re-renders the same table twice for one
+round of output.")
+
 (defun agent-shell-markdown--render-table (table)
   "Render TABLE by replacing [:start, :end] with the rendered :source.
 
@@ -3515,6 +3526,11 @@ The rendered chars carry:
     call can combine it with freshly-streamed rows that arrive
     right after, then re-render the whole table with updated
     column widths.
+
+The table's start is recorded in
+`agent-shell-markdown--tables-rendered' so a later
+`agent-shell-markdown-rerender-tables' re-lays this table out even
+if its stored width matches the display (see that variable).
 
 Caller-set text properties at the table's start position (e.g.,
 `read-only', application-specific tags like an `agent-shell' block
@@ -3569,26 +3585,33 @@ rendered region from inheriting either of our two properties."
       ;; stops that link's hint at its last character, rather than
       ;; answering one position past it.
       (agent-shell-markdown--add-rear-nonsticky
-       table-start end 'cursor-sensor-functions))))
+       table-start end 'cursor-sensor-functions))
+    (push (copy-marker table-start) agent-shell-markdown--tables-rendered)))
 
 (defun agent-shell-markdown-rerender-tables ()
-  "Re-lay out tables whose stored width no longer matches the display.
+  "Re-lay out tables whose stored width or recorded renders are stale.
 
 Each rendered table carries its markdown on
 `agent-shell-markdown-table-source' and the window pixel width its
 columns were measured against on `agent-shell-markdown-table-width'
 \(see `agent-shell-markdown--render-table').  This re-renders from
-the stashed source, at the current window width, only the tables
-whose stored width differs.  A table first laid out off-screen
-\(string-width) or at another width is realigned once shown, while
-tables already correct for the current width are left untouched.
+the stashed source, at the current window width, the tables whose
+stored width differs — a table first laid out off-screen
+\(string-width) or at another width is realigned once shown — and
+the tables rendered since the last call (see
+`agent-shell-markdown--tables-rendered'), which a render that ran
+mid-stream can leave on rows of inconsistent layouts that the width
+check alone can't detect.  Tables already correct and untouched
+since the last call are left alone.
 
 A no-op when the buffer isn't displayed (nothing to measure
-against) or when every table is already at the current width, so it
-is safe to call on display and on resize."
+against), so it is safe to call on display and on resize."
   (when-let* ((window (get-buffer-window (current-buffer) t))
               (width (window-body-width window t)))
-    (let ((regions nil))
+    (let ((dirty (seq-filter (lambda (marker)
+                               (and (markerp marker) (marker-position marker)))
+                             agent-shell-markdown--tables-rendered))
+          (regions nil))
       ;; Collect the stale tables' bounds (as markers, so re-rendering
       ;; one doesn't invalidate the others) and stashed source.
       (save-excursion
@@ -3596,15 +3619,24 @@ is safe to call on display and on resize."
         (let (match)
           (while (setq match (text-property-search-forward
                               'agent-shell-markdown-table-source))
-            (let ((beg (prop-match-beginning match)))
-              (unless (eql width (get-text-property
-                                  beg 'agent-shell-markdown-table-width))
+            (let* ((beg (prop-match-beginning match))
+                   (end (prop-match-end match))
+                   (dirty-p (seq-some (lambda (marker)
+                                        (<= beg (marker-position marker) (1- end)))
+                                      dirty)))
+              (when (or dirty-p
+                        (not (eql width (get-text-property
+                                         beg 'agent-shell-markdown-table-width))))
                 (push (list (cons :source (get-text-property
                                            beg 'agent-shell-markdown-table-source))
                             (cons :start (copy-marker beg))
-                            (cons :end (copy-marker (prop-match-end match))))
+                            (cons :end (copy-marker end)))
                       regions))))))
-      (agent-shell-markdown--relayout-tables (nreverse regions)))))
+      (agent-shell-markdown--relayout-tables (nreverse regions))
+      ;; The freshly-rendered (and the re-rendered) tables are settled:
+      ;; drop the records so a later realign doesn't re-render them
+      ;; again until they're rendered anew.
+      (setq agent-shell-markdown--tables-rendered nil))))
 
 (defun agent-shell-markdown--relayout-tables (tables)
   "Lay out TABLES again from their markdown, without it being an edit.
