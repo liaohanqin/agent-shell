@@ -2976,6 +2976,57 @@ after" nil)))))
   (should (equal (agent-shell-markdown--table-wrap-text "日本のfoo語" 3)
                  '("日" "本" "の" "foo" "語"))))
 
+(ert-deftest agent-shell-markdown-table-measures-display-replacements-as-text ()
+  ;; Regression: a `display' replacement (the math renderer's
+  ;; inline-math image; an SVG redisplay realizes lazily) measures as
+  ;; its rendered width once realized and as its text width before,
+  ;; swinging column widths between renders — and, when narrower than
+  ;; the text, letting column allocation disagree with text-based
+  ;; wrapping, which hard-broke the run into fragments that each
+  ;; redisplayed the image (duplicated formulas).  Measurement ignores
+  ;; replacements: tables size and wrap by text width; pixel padding
+  ;; fills the rendered difference instead.
+  (let ((text (propertize "abcdef" 'face 'bold
+                          'display '(image :type svg :data "<svg/>"))))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'window-live-p) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+               (lambda (&rest _) 6))
+              ((symbol-function 'agent-shell-markdown--table-measure-string)
+               ;; A realized image measures 12px; the stripped text
+               ;; measures 6px per char.
+               (lambda (str &rest _)
+                 (if (text-property-not-all 0 (length str) 'display nil str)
+                     12
+                   (* 6 (string-width str))))))
+      (should (= 6 (agent-shell-markdown--table-display-width
+                    :str text :window 'window))))))
+
+(ert-deftest agent-shell-markdown-table-keeps-display-run-whole ()
+  ;; End to end: a cell carrying a `display' replacement is laid out and
+  ;; wrapped by its text width, so the run survives whole on one line
+  ;; instead of hard-breaking into fragments (each of which would
+  ;; redisplay the image — the duplicated formulas).
+  (let ((source (concat "| a | b |\n|---|---|\n| "
+                        (propertize "\\(x+y\\)" 'face 'bold
+                                    'display '(image :type svg :data "<svg/>"))
+                        " z | w |\n")))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'window-live-p) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell-markdown--display-width)
+               (lambda (&optional _window) 20))
+              ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+               (lambda (&rest _) 6))
+              ((symbol-function 'agent-shell-markdown--table-measure-string)
+               (lambda (str &rest _)
+                 (if (text-property-not-all 0 (length str) 'display nil str)
+                     12
+                   (* 6 (string-width str))))))
+      (let ((rendered (substring-no-properties
+                       (agent-shell-markdown--render-table-source
+                        :source source :window 'window))))
+        (should (string-match-p (regexp-quote "\\(x+y\\) z") rendered))))))
+
 (ert-deftest agent-shell-markdown-mirrors-face-to-font-lock-face ()
   ;; Faces are mirrored to `font-lock-face' so our styling survives
   ;; `font-lock-mode' re-fontification in comint / shell-maker buffers.
@@ -3237,6 +3288,32 @@ returns (agent-shell-markdown-table agent-shell-markdown-table-zebra)."
           (should (< (apply #'max (mapcar #'string-width
                                           (split-string rendered "\n")))
                      45)))))))
+
+(ert-deftest agent-shell-markdown-table-keeps-words-whole-when-fraction-is-short ()
+  ;; Regression: a table whose longest words (e.g. inline-math spans)
+  ;; just overflow `agent-shell-markdown-table-max-width-fraction', but
+  ;; still fit the window, must keep its minimum column widths.
+  ;; Overflowing the fraction used to drop every column to its
+  ;; one-character floor and hard-break the words, splitting `\(...\)'
+  ;; spans into fragments that the math renderer's image, spanning all
+  ;; of them, then drew once per wrapped line — duplicated formulas.
+  (let ((agent-shell-markdown-table-max-width-fraction 0.9))
+    (cl-letf (((symbol-function 'agent-shell-markdown--display-width)
+               ;; Fraction target: floor(0.9 * 64) = 57.
+               (lambda (&optional _window) 64)))
+      (let ((rendered (substring-no-properties
+                       (agent-shell-markdown-convert
+                        (concat
+                         "| a | b |\n|---|---|\n"
+                         "| \\(G,\\tilde{P},Q\\) | partialPivLu()/colPivHouseholderQr() |\n"
+                         "| x | aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll |\n")))))
+        ;; Longest words survive whole: the `\\(...\\)' span (minimum
+        ;; width 17) and the solver name (minimum width 36), whose
+        ;; minimums (60 total) overflow the 57-column fraction but fit
+        ;; the 64-column window.
+        (should (string-match-p (regexp-quote "G,\\tilde{P},Q") rendered))
+        (should (string-match-p (regexp-quote "partialPivLu()/colPivHouseholderQr()")
+                                rendered))))))
 
 (ert-deftest agent-shell-markdown-table-extends-on-streamed-rows ()
   ;; First render a 3-row table.  Then append a 4th data row to the

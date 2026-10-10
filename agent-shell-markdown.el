@@ -2829,6 +2829,22 @@ ASCII-only strings short-circuit and are returned unchanged."
                                result))))
       result)))
 
+(defun agent-shell-markdown--table-strip-display (str)
+  "Return STR with `display' replacements removed, as a measurement copy.
+A replacement (e.g. the math renderer's inline-math image, an SVG
+that redisplay realizes lazily) can measure as its rendered width
+or as its text width depending on realization, which made column
+allocation and wrapping disagree and hard-break the text into
+fragments that each redisplayed the image.  Tables measure and
+wrap by text width instead; the rendered pixels a replacement
+saves or adds are accounted for by `agent-shell-markdown--pad-table-string',
+whose pixel padding fills the remainder of the column."
+  (if (text-property-not-all 0 (length str) 'display nil str)
+      (let ((copy (copy-sequence str)))
+        (remove-text-properties 0 (length copy) '(display nil) copy)
+        copy)
+    str))
+
 (cl-defun agent-shell-markdown--table-display-width (&key str window)
   "Return display width of STR in character units.
 
@@ -2841,25 +2857,31 @@ the actual rendered pixel width rather than a `string-width'
 approximation.  WINDOW supplies the font metrics for that pixel
 path; without a live one, the `string-width' path is taken.
 
+`display' replacements are measured as their underlying text width
+\(see `agent-shell-markdown--table-strip-display'): their rendered
+width is unreliable to measure before redisplay realizes them and
+would otherwise swing column widths between renders.
+
 Mixing the two paths within a column (some rows ASCII-padded, some
 pixel-padded) accumulates fractional drift on the right edge of the
 column and visibly misaligns the vertical pipes between rows."
-  (if (and window
-           (window-live-p window)
-           (fboundp 'window-text-pixel-size)
-           (display-graphic-p)
-           (or (not (string-match-p (rx bos (* ascii) eos) str))
-               (agent-shell-markdown--text-has-face-p str)))
-      ;; TODO: Make this fallback observable.  Discarding the error
-      ;; means a broken pixel path silently degrades to char-width
-      ;; alignment; stashing the last error in a defvar would be
-      ;; enough to diagnose it.
-      (condition-case nil
-          (let ((char-px (agent-shell-markdown--table-char-pixel-width window))
-                (real-px (agent-shell-markdown--table-measure-string str window)))
-            (ceiling (/ (float real-px) char-px)))
-        (error (string-width str)))
-    (string-width str)))
+  (let ((str (agent-shell-markdown--table-strip-display str)))
+    (if (and window
+             (window-live-p window)
+             (fboundp 'window-text-pixel-size)
+             (display-graphic-p)
+             (or (not (string-match-p (rx bos (* ascii) eos) str))
+                 (agent-shell-markdown--text-has-face-p str)))
+        ;; TODO: Make this fallback observable.  Discarding the error
+        ;; means a broken pixel path silently degrades to char-width
+        ;; alignment; stashing the last error in a defvar would be
+        ;; enough to diagnose it.
+        (condition-case nil
+            (let ((char-px (agent-shell-markdown--table-char-pixel-width window))
+                  (real-px (agent-shell-markdown--table-measure-string str window)))
+              (ceiling (/ (float real-px) char-px)))
+          (error (string-width str)))
+      (string-width str))))
 
 (cl-defun agent-shell-markdown--table-longest-word (&key str window)
   "Return display width of the longest unbreakable unit in STR.
@@ -2983,7 +3005,13 @@ ratio (see `agent-shell-markdown--table-face-width-ratio') so wrap
 decisions match the rendered width.  This catches themes where
 inline-code or bold faces pull in a wider/narrower font and the
 unscaled `char-width' undercounts — letting an N-char wrap line
-overflow an N-cell column and push the right pipe out of line."
+overflow an N-cell column and push the right pipe out of line.
+
+`display' replacements contribute their text width like any other
+text: columns are measured by text width too (see
+`agent-shell-markdown--table-strip-display'), so a replacement
+never measures narrower than the run wrapping it and the run is
+never hard-broken mid-display."
   (let* ((ch (seq-elt text pos))
          (base (if (= ch #xFE0F) 1 (char-width ch))))
     (if-let* ((face (and window
@@ -4157,23 +4185,40 @@ prone to a few-pixel drift on emoji-heavy tables."
                           :rows rows :window window))
            (natural-widths (map-elt preprocessed :natural-widths))
            (processed-rows (map-elt preprocessed :processed-rows))
-           (target-width (when agent-shell-markdown-table-wrap-columns
-                           (floor (* (agent-shell-markdown--display-width window)
-                                     agent-shell-markdown-table-max-width-fraction))))
-           (needs-allocation (and target-width
+           (display-width (agent-shell-markdown--display-width window))
+           (fraction-width (when agent-shell-markdown-table-wrap-columns
+                             (floor (* display-width
+                                       agent-shell-markdown-table-max-width-fraction))))
+           (needs-allocation (and fraction-width
                                   (> (agent-shell-markdown--table-total-width
                                       natural-widths)
-                                     target-width)))
+                                     fraction-width)))
            ;; `:min-widths' is expensive (longest-word per cell) and only
            ;; consumed by allocation, which kicks in only when the
            ;; natural total exceeds the target.  Compute lazily.
+           (min-widths (when needs-allocation
+                         (agent-shell-markdown--table-min-widths
+                          :processed-rows processed-rows
+                          :window window)))
+           ;; When even the minimums overflow the fraction, let the
+           ;; table use up to the window's full width before giving up
+           ;; on them: hard-breaking below a column's longest word is
+           ;; the last resort (it splits e.g. inline math into
+           ;; fragments), so only fall back to it when the window
+           ;; itself can't host the minimums.  The 2 accounts for the
+           ;; body's two-column `line-prefix'.
+           (target-width (when fraction-width
+                           (if needs-allocation
+                               (let ((min-total (agent-shell-markdown--table-total-width
+                                                 min-widths)))
+                                 (if (> min-total fraction-width)
+                                     (min min-total (max fraction-width
+                                                         (- display-width 2)))
+                                   fraction-width))
+                             fraction-width)))
            (col-widths (if needs-allocation
                            (agent-shell-markdown--table-allocate-widths
-                            natural-widths
-                            (agent-shell-markdown--table-min-widths
-                             :processed-rows processed-rows
-                             :window window)
-                            target-width)
+                            natural-widths min-widths target-width)
                          natural-widths))
            (data-row-num 0)
            (rendered-rows '()))
