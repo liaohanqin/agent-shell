@@ -801,6 +801,12 @@ are left untouched.  Returns non-nil if at least one replacement was
 made.  A delimiter inside a `code' span within X does not end the span,
 so \"**`let*` form**\" is bold.
 
+Delimiters follow the CommonMark flanking rules (see
+`agent-shell-markdown--emphasis-delimiter-p'), so markup next to CJK
+text (e.g. `公式**直接定义**，') is bold while lone asterisks stay
+literal.  `__X__' additionally may not sit inside a word, keeping
+`snake_case' literal.
+
 For example, the buffer \"hello **world**.\" becomes \"hello
 world.\" with face `agent-shell-markdown-bold' on \"world\"."
   (let ((case-fold-search nil)
@@ -824,7 +830,7 @@ world.\" with face `agent-shell-markdown-bold' on \"world\"."
           (goto-char (cdr avoid)))
          ((agent-shell-markdown--straddles-avoid-range-p
            markup-start markup-end avoid-ranges)
-          (goto-char (1+ markup-start)))
+           (goto-char (1+ markup-start)))
          ((not (and (agent-shell-markdown--emphasis-delimiter-p
                      :position markup-start :length 2 :opening t)
                     (agent-shell-markdown--emphasis-delimiter-p
