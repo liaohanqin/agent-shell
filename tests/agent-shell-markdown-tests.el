@@ -236,6 +236,22 @@
                   (agent-shell-markdown-convert "Echo _hello_world"))
                  '(("Echo _hello_world" nil)))))
 
+(ert-deftest agent-shell-markdown-convert-italic-cjk-adjacent ()
+  ;; A `*' pair glued to CJK text is left- and right-flanking, so the
+  ;; span is italic.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "这是*重点*内容"))
+                 '(("这是" nil)
+                   ("重点" (agent-shell-markdown-italic))
+                   ("内容" nil)))))
+
+(ert-deftest agent-shell-markdown-convert-italic-underscore-cjk-intraword ()
+  ;; `_' may not join word characters, CJK included: this stays
+  ;; literal just as `snake_case' does.
+  (should (equal (agent-shell-markdown--deconstruct
+                  (agent-shell-markdown-convert "变量_名称_后缀"))
+                 '(("变量_名称_后缀" nil)))))
+
 (ert-deftest agent-shell-markdown-convert-italic-lone-asterisks ()
   (should (equal (agent-shell-markdown--deconstruct
                   (agent-shell-markdown-convert "a * b * c"))
