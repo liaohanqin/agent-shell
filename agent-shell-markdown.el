@@ -3311,6 +3311,17 @@ allocated narrower than its natural total, see
             (setq col (1+ col))))))
     min-widths))
 
+(defvar-local agent-shell-markdown--tables-rendered nil
+  "Markers at tables rendered since the last `rerender-tables'.
+`agent-shell-markdown--render-table' records each render here.  The
+next `agent-shell-markdown-rerender-tables' re-lays those tables out
+even when their stored width matches the display, since a render
+that happened while streaming can leave rows on layouts from
+different widths (and content can shift under tables between
+renders), which the width check alone can't detect.  Cleared by that
+re-layout, so it never re-renders the same table twice for one
+round of output.")
+
 (defun agent-shell-markdown--render-table (table)
   "Render TABLE by replacing [:start, :end] with the rendered :source.
 
@@ -3321,6 +3332,11 @@ The rendered chars carry:
     call can combine it with freshly-streamed rows that arrive
     right after, then re-render the whole table with updated
     column widths.
+
+The table's start is recorded in
+`agent-shell-markdown--tables-rendered' so a later
+`agent-shell-markdown-rerender-tables' re-lays this table out even
+if its stored width matches the display (see that variable).
 
 Caller-set text properties at the table's start position (e.g.,
 `read-only', application-specific tags like an `agent-shell' block
@@ -3375,26 +3391,33 @@ rendered region from inheriting either of our two properties."
       ;; stops that link's hint at its last character, rather than
       ;; answering one position past it.
       (agent-shell-markdown--add-rear-nonsticky
-       table-start end 'cursor-sensor-functions))))
+       table-start end 'cursor-sensor-functions))
+    (push (copy-marker table-start) agent-shell-markdown--tables-rendered)))
 
 (defun agent-shell-markdown-rerender-tables ()
-  "Re-lay out tables whose stored width no longer matches the display.
+  "Re-lay out tables whose stored width or recorded renders are stale.
 
 Each rendered table carries its markdown on
 `agent-shell-markdown-table-source' and the window pixel width its
 columns were measured against on `agent-shell-markdown-table-width'
 \(see `agent-shell-markdown--render-table').  This re-renders from
-the stashed source, at the current window width, only the tables
-whose stored width differs.  A table first laid out off-screen
-\(string-width) or at another width is realigned once shown, while
-tables already correct for the current width are left untouched.
+the stashed source, at the current window width, the tables whose
+stored width differs — a table first laid out off-screen
+\(string-width) or at another width is realigned once shown — and
+the tables rendered since the last call (see
+`agent-shell-markdown--tables-rendered'), which a render that ran
+mid-stream can leave on rows of inconsistent layouts that the width
+check alone can't detect.  Tables already correct and untouched
+since the last call are left alone.
 
 A no-op when the buffer isn't displayed (nothing to measure
-against) or when every table is already at the current width, so it
-is safe to call on display and on resize."
+against), so it is safe to call on display and on resize."
   (when-let* ((window (get-buffer-window (current-buffer) t))
               (width (window-body-width window t)))
-    (let ((regions nil))
+    (let ((dirty (seq-filter (lambda (marker)
+                               (and (markerp marker) (marker-position marker)))
+                             agent-shell-markdown--tables-rendered))
+          (regions nil))
       ;; Collect the stale tables' bounds (as markers, so re-rendering
       ;; one doesn't invalidate the others) and stashed source.
       (save-excursion
@@ -3402,11 +3425,16 @@ is safe to call on display and on resize."
         (let (match)
           (while (setq match (text-property-search-forward
                               'agent-shell-markdown-table-source))
-            (let ((beg (prop-match-beginning match)))
-              (unless (eql width (get-text-property
-                                  beg 'agent-shell-markdown-table-width))
+            (let* ((beg (prop-match-beginning match))
+                   (end (prop-match-end match))
+                   (dirty-p (seq-some (lambda (marker)
+                                        (<= beg (marker-position marker) (1- end)))
+                                      dirty)))
+              (when (or dirty-p
+                        (not (eql width (get-text-property
+                                         beg 'agent-shell-markdown-table-width))))
                 (push (list (copy-marker beg)
-                            (copy-marker (prop-match-end match))
+                            (copy-marker end)
                             (get-text-property
                              beg 'agent-shell-markdown-table-source))
                       regions))))))
@@ -3426,7 +3454,11 @@ is safe to call on display and on resize."
                      (cons :end (marker-position (nth 1 region)))))
               (set-marker (nth 0 region) nil)
               (set-marker (nth 1 region) nil)))
-          (restore-buffer-modified-p modified))))))
+          (restore-buffer-modified-p modified)))
+      ;; The freshly-rendered (and the re-rendered) tables are settled:
+      ;; drop the records so a later realign doesn't re-render them
+      ;; again until they're rendered anew.
+      (setq agent-shell-markdown--tables-rendered nil))))
 
 (defun agent-shell-markdown--displayed-window-width ()
   "Return the body pixel width of a window showing the current buffer, or nil.

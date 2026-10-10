@@ -3062,9 +3062,11 @@ after" nil)))))
       (should (equal (buffer-string) rendered)))))
 
 (ert-deftest agent-shell-markdown-rerender-tables-skips-matching-width ()
-  ;; Re-render touches only tables whose stored
+  ;; Re-render touches a table when its stored
   ;; `agent-shell-markdown-table-width' differs from the window's
-  ;; current width; a table already laid out for that width is skipped.
+  ;; current width, or when it was rendered since the last call (see
+  ;; `agent-shell-markdown-rerender-tables-relayouts-rendered-tables').
+  ;; Once settled, a table of matching width is skipped.
   (with-temp-buffer
     (insert "| A | B |\n|---|---|\n| 1 | 2 |\n")
     (agent-shell-markdown-replace-markup)
@@ -3076,9 +3078,34 @@ after" nil)))))
         ;; Stored width (nil, rendered off-screen) differs from 500.
         (agent-shell-markdown-rerender-tables)
         (should (= calls 1))
-        ;; Mark the table as already laid out for 500 -> skipped.
+        ;; Mark the table as already laid out for 500; the re-layout
+        ;; above also cleared its render record, so it's now skipped.
         (put-text-property (point-min) (point-max)
                            'agent-shell-markdown-table-width 500)
+        (setq calls 0)
+        (agent-shell-markdown-rerender-tables)
+        (should (= calls 0))))))
+
+(ert-deftest agent-shell-markdown-rerender-tables-relayouts-rendered-tables ()
+  ;; A table rendered since the last call is re-laid out even when its
+  ;; stored width matches the display: a mid-stream render can leave
+  ;; rows on layouts from different widths, which the width check
+  ;; alone can't detect.  After that settling re-layout it is skipped
+  ;; until rendered anew.
+  (with-temp-buffer
+    (insert "| A | B |\n|---|---|\n| 1 | 2 |\n")
+    (agent-shell-markdown-replace-markup)
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'w))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+                ((symbol-function 'agent-shell-markdown--render-table)
+                 (lambda (_table) (setq calls (1+ calls)))))
+        ;; Matching width, so only the recorded render makes it stale.
+        (put-text-property (point-min) (point-max)
+                           'agent-shell-markdown-table-width 500)
+        (agent-shell-markdown-rerender-tables)
+        (should (= calls 1))
+        ;; Settled: nothing left to re-layout.
         (setq calls 0)
         (agent-shell-markdown-rerender-tables)
         (should (= calls 0))))))

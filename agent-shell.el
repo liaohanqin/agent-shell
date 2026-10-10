@@ -5566,7 +5566,14 @@ with GROUP-EXPANDED as the group's initial fold state."
                                               :external-renderers nil
                                               :complete t))))
           (when auto-scroll
-            (goto-char (point-max)))))))
+            (goto-char (point-max)))
+          ;; The render above can leave tables mid-stream (rows measured
+          ;; against different widths), and async renderers (e.g. math
+          ;; images) can change how content measures after it.  Schedule
+          ;; the same re-layout the window hooks use, so settled output
+          ;; re-aligns its tables once the stream pauses.
+          (when-let* ((window (get-buffer-window (current-buffer) t)))
+            (agent-shell--realign-on-change window))))))
   (with-current-buffer (map-elt state :buffer)
     (unless (and (derived-mode-p 'agent-shell-mode)
                  (equal (current-buffer)
@@ -5675,7 +5682,14 @@ with GROUP-EXPANDED as the group's initial fold state."
     ;; Runs outside the `buffer-undo-list' binding above, which would
     ;; otherwise swallow the reset.
     (when above-last-prompt
-      (agent-shell--reset-undo-history))))
+      (agent-shell--reset-undo-history))
+    ;; The render above can leave tables mid-stream (rows measured
+    ;; against different widths), and async renderers (e.g. math
+    ;; images) can change how content measures after it.  Schedule the
+    ;; same re-layout the window hooks use, so settled output re-aligns
+    ;; its tables once the stream pauses.
+    (when-let* ((window (get-buffer-window (current-buffer) t)))
+      (agent-shell--realign-on-change window))))
 
 (cl-defun agent-shell--update-text (&key state namespace-id block-id text append create-new)
   "Update plain text entry in the shell buffer.
