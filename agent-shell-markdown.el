@@ -4429,23 +4429,40 @@ prone to a few-pixel drift on emoji-heavy tables."
                           :rows rows :window window))
            (natural-widths (map-elt preprocessed :natural-widths))
            (processed-rows (map-elt preprocessed :processed-rows))
-           (target-width (when agent-shell-markdown-table-wrap-columns
-                           (floor (* (agent-shell-markdown--display-width window)
-                                     agent-shell-markdown-table-max-width-fraction))))
-           (needs-allocation (and target-width
+           (display-width (agent-shell-markdown--display-width window))
+           (fraction-width (when agent-shell-markdown-table-wrap-columns
+                             (floor (* display-width
+                                       agent-shell-markdown-table-max-width-fraction))))
+           (needs-allocation (and fraction-width
                                   (> (agent-shell-markdown--table-total-width
                                       natural-widths)
-                                     target-width)))
+                                     fraction-width)))
            ;; `:min-widths' is expensive (longest-word per cell) and only
            ;; consumed by allocation, which kicks in only when the
            ;; natural total exceeds the target.  Compute lazily.
+           (min-widths (when needs-allocation
+                         (agent-shell-markdown--table-min-widths
+                          :processed-rows processed-rows
+                          :window window)))
+           ;; When even the minimums overflow the fraction, let the
+           ;; table use up to the window's full width before giving up
+           ;; on them: hard-breaking below a column's longest word is
+           ;; the last resort (it splits e.g. inline math into
+           ;; fragments), so only fall back to it when the window
+           ;; itself can't host the minimums.  The 2 accounts for the
+           ;; body's two-column `line-prefix'.
+           (target-width (when fraction-width
+                           (if needs-allocation
+                               (let ((min-total (agent-shell-markdown--table-total-width
+                                                 min-widths)))
+                                 (if (> min-total fraction-width)
+                                     (min min-total (max fraction-width
+                                                         (- display-width 2)))
+                                   fraction-width))
+                             fraction-width)))
            (col-widths (if needs-allocation
                            (agent-shell-markdown--table-allocate-widths
-                            natural-widths
-                            (agent-shell-markdown--table-min-widths
-                             :processed-rows processed-rows
-                             :window window)
-                            target-width)
+                            natural-widths min-widths target-width)
                          natural-widths))
            (data-row-num 0)
            (rendered-rows '()))

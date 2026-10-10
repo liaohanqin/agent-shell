@@ -3632,6 +3632,32 @@ returns (agent-shell-markdown-table agent-shell-markdown-table-zebra)."
                                           (split-string rendered "\n")))
                      45)))))))
 
+(ert-deftest agent-shell-markdown-table-keeps-words-whole-when-fraction-is-short ()
+  ;; Regression: a table whose longest words (e.g. inline-math spans)
+  ;; just overflow `agent-shell-markdown-table-max-width-fraction', but
+  ;; still fit the window, must keep its minimum column widths.
+  ;; Overflowing the fraction used to drop every column to its
+  ;; one-character floor and hard-break the words, splitting `\(...\)'
+  ;; spans into fragments that the math renderer's image, spanning all
+  ;; of them, then drew once per wrapped line — duplicated formulas.
+  (let ((agent-shell-markdown-table-max-width-fraction 0.9))
+    (cl-letf (((symbol-function 'agent-shell-markdown--display-width)
+               ;; Fraction target: floor(0.9 * 64) = 57.
+               (lambda (&optional _window) 64)))
+      (let ((rendered (substring-no-properties
+                       (agent-shell-markdown-convert
+                        (concat
+                         "| a | b |\n|---|---|\n"
+                         "| \\(G,\\tilde{P},Q\\) | partialPivLu()/colPivHouseholderQr() |\n"
+                         "| x | aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj kkkk llll |\n")))))
+        ;; Longest words survive whole: the `\\(...\\)' span (minimum
+        ;; width 17) and the solver name (minimum width 36), whose
+        ;; minimums (60 total) overflow the 57-column fraction but fit
+        ;; the 64-column window.
+        (should (string-match-p (regexp-quote "G,\\tilde{P},Q") rendered))
+        (should (string-match-p (regexp-quote "partialPivLu()/colPivHouseholderQr()")
+                                rendered))))))
+
 (ert-deftest agent-shell-markdown-table-extends-on-streamed-rows ()
   ;; First render a 3-row table.  Then append a 4th data row to the
   ;; buffer (simulating an LLM streaming more content) and re-render.
