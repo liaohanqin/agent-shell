@@ -3123,6 +3123,48 @@ after" nil)))))
             (setq pos (or next (length rendered)))))
         (should (= runs 1))))))
 
+(ert-deftest agent-shell-markdown-table-keeps-atomic-run-whole-when-column-short ()
+  ;; Regression (an external renderer claiming a region *before* its
+  ;; image exists: the math renderer renders from a timer, and its
+  ;; `display' property only lands then): with only `display' runs
+  ;; unbreakable, the wrapper split the claim at a space inside it, and
+  ;; the image then landed on every fragment — the duplicated formulas.
+  ;; A run tagged `agent-shell-markdown-atomic' must stay whole.
+  (let ((source (concat
+                 "| head | wide |\n|---|---|\n| "
+                 (propertize "\\(r_i=\\min_{j\\ne i}\\|p_i-p_j\\|\\)"
+                             'face 'agent-shell-math-renderer
+                             'agent-shell-markdown-atomic t)
+                 " | a much longer cell |\n"))
+        (agent-shell-markdown-table-max-width-fraction 1.0))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'window-live-p) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell-markdown--display-width)
+               (lambda (&optional _window) 30))
+              ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+               (lambda (&rest _) 6))
+              ((symbol-function 'agent-shell-markdown--table-measure-string)
+               (lambda (str &rest _)
+                 (* 6 (string-width str)))))
+      (let* ((rendered (agent-shell-markdown--render-table-source
+                        :source source :window 'window))
+             (text (substring-no-properties rendered))
+             (runs 0)
+             (pos 0))
+        ;; The whole run survives on one line…
+        (should (string-match-p
+                 (regexp-quote "\\(r_i=\\min_{j\\ne i}\\|p_i-p_j\\|\\)")
+                 text))
+        ;; …as one contiguous atomic run, still tagged for the render
+        ;; that will lay the image over it.
+        (while (< pos (length rendered))
+          (let ((next (next-single-property-change
+                       pos 'agent-shell-markdown-atomic rendered)))
+            (when (get-text-property pos 'agent-shell-markdown-atomic rendered)
+              (setq runs (1+ runs)))
+            (setq pos (or next (length rendered)))))
+        (should (= runs 1))))))
+
 (ert-deftest agent-shell-markdown-mirrors-face-to-font-lock-face ()
   ;; Faces are mirrored to `font-lock-face' so our styling survives
   ;; `font-lock-mode' re-fontification in comint / shell-maker buffers.
