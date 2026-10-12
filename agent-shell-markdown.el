@@ -303,6 +303,14 @@ visible text — the same mechanism fenced blocks and tables use.  A
 text property (not an overlay) is required so it survives being
 copied into another buffer (e.g. the viewport).
 
+A renderer whose region is one unit that must not be reflowed — one
+image laid over it later, say, which every fragment of a split
+region would redisplay whole — should tag its chars
+`agent-shell-markdown-atomic' as well: the table wrapper then keeps
+the run whole instead of breaking it across wrapped lines.  (A
+`display' replacement is unbreakable by construction; the tag
+covers a region between the claim and its image.)
+
 CONTEXT keys:
 
   :source-blocks  List of fenced-block descriptors (see
@@ -3163,27 +3171,39 @@ character, variation selector, ZWJ) and must stay attached."
   (and (aref (char-category-set (seq-elt text i)) ?|)
        (> (char-width (seq-elt text (1+ i))) 0)))
 
-(defun agent-shell-markdown--table-display-run (text pos)
-  "Return the `display' run in TEXT covering POS as (START . END), or nil.
-POS must be a valid index into TEXT.  A run is a maximal stretch of
-characters carrying the same `display' property value, compared
-with `eq' — a single `put-text-property' call installs one object,
-and `buffer-substring' / `substring' carry it along, so one
-replacement stays one object even as a cell is re-split.  POS on a
-character without a `display' property yields nil."
-  (let ((display (and (< pos (length text))
-                      (get-text-property pos 'display text))))
-    (when display
-      (let ((start pos)
-            (end (1+ pos)))
-        (while (and (> start 0)
-                    (eq (get-text-property (1- start) 'display text)
-                        display))
-          (setq start (1- start)))
-        (while (and (< end (length text))
-                    (eq (get-text-property end 'display text) display))
-          (setq end (1+ end)))
-        (cons start end)))))
+(defun agent-shell-markdown--table-unbreakable-run (text pos)
+  "Return the unbreakable run in TEXT covering POS as (START . END), or nil.
+POS must be a valid index into TEXT.  A run is unbreakable in two
+cases, and each is a stretch of characters nobody may break across
+lines:
+
+  - they carry the same `display' property value (compared with
+    `eq' — a single `put-text-property' call installs one object, and
+    `buffer-substring' / `substring' carry it along, so one
+    replacement stays one object even as a cell is re-split), or
+  - they are tagged `agent-shell-markdown-atomic', the tag an external
+    renderer puts on a region it is about to replace with one image
+    (see `agent-shell-markdown-render-functions').
+
+POS on a character that is neither yields nil."
+  (when (< pos (length text))
+    (let* ((display (get-text-property pos 'display text))
+           (atomic (get-text-property pos 'agent-shell-markdown-atomic text))
+           (in-run-p (cond (display
+                            (lambda (i)
+                              (eq (get-text-property i 'display text) display)))
+                           (atomic
+                            (lambda (i)
+                              (get-text-property
+                               i 'agent-shell-markdown-atomic text))))))
+      (when in-run-p
+        (let ((start pos)
+              (end (1+ pos)))
+          (while (and (> start 0) (funcall in-run-p (1- start)))
+            (setq start (1- start)))
+          (while (and (< end (length text)) (funcall in-run-p end))
+            (setq end (1+ end)))
+          (cons start end))))))
 
 (cl-defun agent-shell-markdown--table-wrap-text (text width &optional window)
   "Wrap TEXT to fit within WIDTH, returning a list of lines.
@@ -3192,15 +3212,16 @@ Preserves text properties across wrapped lines.
 Breaks after whitespace or a line-breakable (CJK) character; a
 run with no break point splits at the width limit.
 
-A `display' replacement (e.g. the math renderer's inline-math
-image) is atomic: the wrapper never breaks inside one.  Every
-fragment of a split replacement still carries the whole `display'
-value, so redisplay would draw the image once per wrapped line —
-the duplicated formulas.  A line whose width limit falls inside a
-replacement takes the whole run and overruns instead; the run's
-rendered width is usually much narrower than its text width and
-the pixel padding of `agent-shell-markdown--pad-table-string'
-absorbs the difference.
+An unbreakable run (see `agent-shell-markdown--table-unbreakable-run':
+a `display' replacement such as the math renderer's inline-math
+image, or a region an external renderer tagged
+`agent-shell-markdown-atomic') is never broken: every fragment of a
+split replacement still carries the whole `display' value, so
+redisplay would draw the image once per wrapped line — the
+duplicated formulas.  A line whose width limit falls inside such a
+run takes it whole and overruns instead; the run's rendered width
+is usually much narrower than its text width and the pixel padding
+of `agent-shell-markdown--pad-table-string' absorbs the difference.
 
 Uses the VS-16-aware width helper so that emoji presentation
 sequences (`⚠️') count as their actual rendered width (2 cells)
@@ -3246,9 +3267,9 @@ width exceeds the column budget, drifting the right pipe."
           ;; first char already exceeds WIDTH (e.g. wide glyph).
           (when (= end-pos pos)
             (setq end-pos (1+ pos)))
-          ;; Never stop inside a `display' replacement: take the run
-          ;; whole even when it overruns WIDTH (see the docstring).
-          (let ((run (agent-shell-markdown--table-display-run text end-pos)))
+          ;; Never stop inside an unbreakable run: take it whole even
+          ;; when it overruns WIDTH (see the docstring).
+          (let ((run (agent-shell-markdown--table-unbreakable-run text end-pos)))
             (when (and run (> end-pos (car run)))
               (setq end-pos (cdr run))))
           ;; Try to break at the last clean break point within
@@ -3262,10 +3283,10 @@ width exceeds the column budget, drifting the right pipe."
                                       (memq (seq-elt text scan) '(?\s ?\t))))
                             (not (agent-shell-markdown--table-break-after-p
                                   text scan)))
-                  (let ((run (agent-shell-markdown--table-display-run
+                  (let ((run (agent-shell-markdown--table-unbreakable-run
                               text scan)))
-                    ;; A clean break point inside a replacement is not
-                    ;; clean at all — resume scanning before it.
+                    ;; A clean break point inside an unbreakable run is
+                    ;; not clean at all — resume scanning before it.
                     (setq scan (if (and run (> scan (car run)))
                                    (1- (car run))
                                  (1- scan)))))
