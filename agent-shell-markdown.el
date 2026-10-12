@@ -3164,12 +3164,44 @@ character, variation selector, ZWJ) and must stay attached."
   (and (aref (char-category-set (seq-elt text i)) ?|)
        (> (char-width (seq-elt text (1+ i))) 0)))
 
+(defun agent-shell-markdown--table-display-run (text pos)
+  "Return the `display' run in TEXT covering POS as (START . END), or nil.
+POS must be a valid index into TEXT.  A run is a maximal stretch of
+characters carrying the same `display' property value, compared
+with `eq' — a single `put-text-property' call installs one object,
+and `buffer-substring' / `substring' carry it along, so one
+replacement stays one object even as a cell is re-split.  POS on a
+character without a `display' property yields nil."
+  (let ((display (and (< pos (length text))
+                      (get-text-property pos 'display text))))
+    (when display
+      (let ((start pos)
+            (end (1+ pos)))
+        (while (and (> start 0)
+                    (eq (get-text-property (1- start) 'display text)
+                        display))
+          (setq start (1- start)))
+        (while (and (< end (length text))
+                    (eq (get-text-property end 'display text) display))
+          (setq end (1+ end)))
+        (cons start end)))))
+
 (cl-defun agent-shell-markdown--table-wrap-text (text width &optional window)
   "Wrap TEXT to fit within WIDTH, returning a list of lines.
 Preserves text properties across wrapped lines.
 
 Breaks after whitespace or a line-breakable (CJK) character; a
 run with no break point splits at the width limit.
+
+A `display' replacement (e.g. the math renderer's inline-math
+image) is atomic: the wrapper never breaks inside one.  Every
+fragment of a split replacement still carries the whole `display'
+value, so redisplay would draw the image once per wrapped line —
+the duplicated formulas.  A line whose width limit falls inside a
+replacement takes the whole run and overruns instead; the run's
+rendered width is usually much narrower than its text width and
+the pixel padding of `agent-shell-markdown--pad-table-string'
+absorbs the difference.
 
 Uses the VS-16-aware width helper so that emoji presentation
 sequences (`⚠️') count as their actual rendered width (2 cells)
@@ -3215,6 +3247,11 @@ width exceeds the column budget, drifting the right pipe."
           ;; first char already exceeds WIDTH (e.g. wide glyph).
           (when (= end-pos pos)
             (setq end-pos (1+ pos)))
+          ;; Never stop inside a `display' replacement: take the run
+          ;; whole even when it overruns WIDTH (see the docstring).
+          (let ((run (agent-shell-markdown--table-display-run text end-pos)))
+            (when (and run (> end-pos (car run)))
+              (setq end-pos (cdr run))))
           ;; Try to break at the last clean break point within
           ;; [pos, end-pos): after whitespace, or after a
           ;; line-breakable (CJK) character.
@@ -3226,7 +3263,13 @@ width exceeds the column budget, drifting the right pipe."
                                       (memq (seq-elt text scan) '(?\s ?\t))))
                             (not (agent-shell-markdown--table-break-after-p
                                   text scan)))
-                  (setq scan (1- scan)))
+                  (let ((run (agent-shell-markdown--table-display-run
+                              text scan)))
+                    ;; A clean break point inside a replacement is not
+                    ;; clean at all — resume scanning before it.
+                    (setq scan (if (and run (> scan (car run)))
+                                   (1- (car run))
+                                 (1- scan)))))
                 (when (>= scan pos)
                   (setq break-pos (1+ scan)))))
             (push (string-trim-right (substring text pos break-pos)) lines)

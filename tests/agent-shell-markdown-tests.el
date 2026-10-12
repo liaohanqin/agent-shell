@@ -3079,6 +3079,50 @@ after" nil)))))
                         :source source :window 'window))))
         (should (string-match-p (regexp-quote "\\(x+y\\) z") rendered))))))
 
+(ert-deftest agent-shell-markdown-table-keeps-display-run-whole-when-column-short ()
+  ;; Regression: column allocation can shrink a column below a cell's
+  ;; display-run text width (a table too wide for the window).  The
+  ;; wrapper then hard-broke the run at a whitespace inside it, and
+  ;; every fragment still carried the whole replacement — redisplay
+  ;; drew the image once per wrapped line (duplicated formulas).  A
+  ;; display run is atomic: the line takes it whole and overruns, and
+  ;; the pixel padding absorbs the difference.
+  (let ((source (concat
+                 "| head | wide |\n|---|---|\n| "
+                 (propertize "\\(r_i=\\min_{j\\ne i}\\|p_i-p_j\\|\\)"
+                             'face 'agent-shell-math-renderer
+                             'display '(image :type svg :data "<svg/>"))
+                 " | a much longer cell |\n"))
+        (agent-shell-markdown-table-max-width-fraction 1.0))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'window-live-p) (lambda (&rest _) t))
+              ((symbol-function 'agent-shell-markdown--display-width)
+               (lambda (&optional _window) 30))
+              ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+               (lambda (&rest _) 6))
+              ((symbol-function 'agent-shell-markdown--table-measure-string)
+               (lambda (str &rest _)
+                 (if (text-property-not-all 0 (length str) 'display nil str)
+                     12
+                   (* 6 (string-width str))))))
+      (let* ((rendered (agent-shell-markdown--render-table-source
+                        :source source :window 'window))
+             (text (substring-no-properties rendered))
+             (runs 0)
+             (pos 0))
+        ;; The whole run survives on one line…
+        (should (string-match-p
+                 (regexp-quote "\\(r_i=\\min_{j\\ne i}\\|p_i-p_j\\|\\)")
+                 text))
+        ;; …as one contiguous display run, not fragments that would each
+        ;; redisplay the image.
+        (while (< pos (length rendered))
+          (let ((next (next-single-property-change pos 'display rendered)))
+            (when (get-text-property pos 'display rendered)
+              (setq runs (1+ runs)))
+            (setq pos (or next (length rendered)))))
+        (should (= runs 1))))))
+
 (ert-deftest agent-shell-markdown-mirrors-face-to-font-lock-face ()
   ;; Faces are mirrored to `font-lock-face' so our styling survives
   ;; `font-lock-mode' re-fontification in comint / shell-maker buffers.
