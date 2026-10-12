@@ -3300,7 +3300,8 @@ width exceeds the column budget, drifting the right pipe."
               (setq pos (1+ pos))))))
       (nreverse lines)))))
 
-(cl-defun agent-shell-markdown--pad-table-string (&key str width window force-pixel)
+(cl-defun agent-shell-markdown--pad-table-string (&key str width window force-pixel
+                                                       measure-from measure-to)
   "Pad STR with spaces to reach WIDTH columns.
 
 ASCII-only strings take the cheap `string-width' + spaces path.
@@ -3316,7 +3317,16 @@ STR's content.  Callers use this to keep all wrapped lines of one
 multi-line cell on the same path — otherwise a wrapped cell that
 splits non-ASCII content (e.g. an em dash) onto one line and pure
 ASCII content onto another would render those continuation lines
-via different paths and drift sub-pixel on their right edge."
+via different paths and drift sub-pixel on their right edge.
+
+MEASURE-FROM / MEASURE-TO, when given, are the buffer positions STR
+was taken from: the pixel path measures that buffer range in WINDOW
+rather than a copy of the string in a work buffer, so the `display'
+replacements in it — an image an external renderer has laid over a
+formula — are realized and counted at the width they are drawn at.
+\(`agent-shell-markdown--table-measure-string' counts their text: a
+string measured where it is not displayed keeps the text width, which
+is what a layout wants before the image lands, and is wrong after.)"
   (if (and window
            (window-live-p window)
            (fboundp 'window-text-pixel-size)
@@ -3331,7 +3341,11 @@ via different paths and drift sub-pixel on their right edge."
       (condition-case nil
           (let* ((char-px (agent-shell-markdown--table-char-pixel-width window))
                  (target-px (* width char-px))
-                 (content-px (agent-shell-markdown--table-measure-string str window))
+                 (content-px (if (and measure-from measure-to)
+                                 (car (window-text-pixel-size
+                                       window measure-from measure-to))
+                               (agent-shell-markdown--table-measure-string
+                                str window)))
                  (pad-px (- target-px content-px)))
             (if (<= pad-px 0)
                 ;; Pixel measurement says the content already fills (or
@@ -3665,6 +3679,230 @@ against), so it is safe to call on display and on resize."
       ;; drop the records so a later realign doesn't re-render them
       ;; again until they're rendered anew.
       (setq agent-shell-markdown--tables-rendered nil))))
+
+(defun agent-shell-markdown--realign-table-border-p (position)
+  "Return non-nil when POSITION holds a rendered table's border character.
+The character carries the `agent-shell-markdown-table-border' face, in
+its `face' property or in the `font-lock-face' mirror of it."
+  (memq 'agent-shell-markdown-table-border
+        (ensure-list (or (get-text-property position 'face)
+                         (get-text-property position 'font-lock-face)))))
+
+(defun agent-shell-markdown--realign-row-cells (line-start line-end)
+  "Return (START . END) of each cell of the rendered row line at LINE-START.
+The line is `\\u2502 cell \\u2502 cell \\u2502' (or its ASCII form), and its
+border characters — the ones carrying
+`agent-shell-markdown-table-border' — are the delimiters.  A border
+character *inside* a cell, such as an inline-code body holding a
+literal `|', carries cell faces instead and stays content.  (The
+whole rendered table is tagged `agent-shell-markdown-frozen', so that
+tag cannot tell the two apart.)"
+  (let ((border (char-after line-start))
+        (cells '())
+        (cell-start (1+ line-start))
+        (pos (1+ line-start)))
+    (while (< pos line-end)
+      (when (and (eq (char-after pos) border)
+                 (agent-shell-markdown--realign-table-border-p pos))
+        (push (cons cell-start pos) cells)
+        (setq cell-start (1+ pos)))
+      (setq pos (1+ pos)))
+    (when (< cell-start line-end)
+      (push (cons cell-start line-end) cells))
+    (nreverse cells)))
+
+(defun agent-shell-markdown--rendered-separator-line-p (line-start line-end)
+  "Return non-nil when the rendered line LINE-START..LINE-END is a separator.
+That is a line of border, tee/corner and dash characters with at
+least one dash in it: a row line always carries cell text."
+  (let ((pos line-start)
+        (dashes 0)
+        (separator t))
+    (while (and separator (< pos line-end))
+      (let ((ch (char-after pos)))
+        (cond ((memq ch '(?\- ?\u2500)) (setq dashes (1+ dashes)))
+              ((memq ch (list (char-after line-start) ?\s ?\t
+                              ?\u251C ?\u253C ?\u2524)))
+              (t (setq separator nil))))
+      (setq pos (1+ pos)))
+    (and separator (> dashes 0))))
+
+(defun agent-shell-markdown--realign-separator-widths (line-start line-end)
+  "Return the column widths LINE-START..LINE-END's dash runs stand for.
+Each run is WIDTH + 2 long, see `agent-shell-markdown--render-table-separator-row'."
+  (let ((runs '())
+        (run 0))
+    (dotimes (i (- line-end line-start))
+      (if (memq (char-after (+ line-start i)) '(?\- ?\u2500))
+          (setq run (1+ run))
+        (when (> run 0) (push run runs))
+        (setq run 0)))
+    (when (> run 0) (push run runs))
+    (mapcar (lambda (run) (- run 2)) (nreverse runs))))
+
+(defun agent-shell-markdown--realign-table-widths (beg end)
+  "Return the column widths in characters of the rendered table BEG..END.
+Read from the separator row's dash runs — no cell content can widen
+them — or, for a table rendered without a separator row, from the
+narrowest row line carrying each column (a line that overflows its
+column is wider than the width, never narrower).  Nil when neither is
+found."
+  (let ((separator-widths nil)
+        (line-widths '()))
+    (save-excursion
+      (goto-char beg)
+      (while (< (point) end)
+        (let ((line-start (line-beginning-position))
+              (line-end (line-end-position)))
+          (cond
+           ((agent-shell-markdown--rendered-separator-line-p line-start line-end)
+            (setq separator-widths
+                  (agent-shell-markdown--realign-separator-widths
+                   line-start line-end)))
+           ((eq (char-after line-start) (char-after beg))
+            (push (mapcar (lambda (cell) (- (cdr cell) (car cell) 2))
+                          (agent-shell-markdown--realign-row-cells
+                           line-start line-end))
+                  line-widths)))
+          (forward-line 1))))
+    (or separator-widths
+        (when line-widths
+          (let ((columns (apply #'min (mapcar #'length line-widths)))
+                (widths '()))
+            (dotimes (col columns)
+              (push (apply #'min
+                           (delq nil (mapcar (lambda (row) (nth col row))
+                                             line-widths)))
+                    widths))
+            (nreverse widths))))))
+
+(defun agent-shell-markdown--realign-cell (cell-start cell-end width window)
+  "Re-pad the rendered cell CELL-START..CELL-END to WIDTH, as a layout would now.
+A rendered cell is ` CONTENT PADDING ', so only the padding is
+rewritten: the content keeps its text properties (the image over a
+formula is one of them), and the new padding takes the properties the
+old padding had — the row face, the table's tags — minus what the
+insertion next to the content would otherwise inherit from it (the
+image's `display', its tooltip)."
+  (let* ((text (buffer-substring cell-start cell-end))
+         (content (string-trim text))
+         (padded (agent-shell-markdown--pad-table-string
+                  :str content :width width :window window
+                  ;; Measure the content where it is drawn: a `display'
+                  ;; replacement (an image over a formula) is realized
+                  ;; there, and the padding has to leave room for what is
+                  ;; actually rendered, not for the text underneath.
+                  :measure-from (+ cell-start 1)
+                  :measure-to (+ cell-start 1 (length content))
+                  :force-pixel (and (not (string-empty-p content))
+                                    (or (not (string-match-p (rx bos (* ascii) eos)
+                                                             content))
+                                        (agent-shell-markdown--text-has-face-p
+                                         content)))))
+         (pad-start (+ cell-start 1 (length content)))
+         (new-padding (concat (substring padded (length content)) " "))
+         ;; The old padding's properties when there is padding to take
+         ;; them from (an overlowing cell has none), else the content's
+         ;; last character's, which is what an insertion would inherit.
+         (props (if (< pad-start cell-end)
+                    (text-properties-at pad-start)
+                  (text-properties-at (1- pad-start)))))
+    (unless (equal (buffer-substring-no-properties pad-start cell-end)
+                   new-padding)
+      (delete-region pad-start cell-end)
+      (goto-char pad-start)
+      (insert (if props
+                  (apply #'propertize new-padding
+                         (seq-remove (lambda (prop)
+                                       (memq prop '(display mouse-face help-echo)))
+                                     props))
+                new-padding))
+      ;; The insert sits right after the content, so it also inherits the
+      ;; content's properties — the image's `display', its tooltip, its
+      ;; mouse face.  Keep only the `display's the padding brought itself
+      ;; (the stretch that fills the column's last pixels) and the padding's
+      ;; own properties.
+      (remove-text-properties pad-start (point) '(mouse-face nil help-echo nil))
+      (let ((offset 0)
+            (len (length new-padding)))
+        (while (< offset len)
+          (let* ((next (or (next-single-property-change offset 'display new-padding)
+                           len))
+                 (display (get-text-property offset 'display new-padding)))
+            (if display
+                (put-text-property (+ pad-start offset) (+ pad-start next)
+                                   'display display)
+              (remove-text-properties (+ pad-start offset) (+ pad-start next)
+                                      '(display nil)))
+            (setq offset next)))))))
+
+(defun agent-shell-markdown-realign-table-at (position)
+  "Re-pad the rendered table whose rows cover POSITION.
+A table's padding is computed when it is laid out, from the width
+each cell has then.  A cell whose *rendered* width changes in place
+afterwards — an external renderer laying an image over a formula, for
+instance, when it draws from a timer after the layout — leaves the
+cell's padding, and the row's right border, off by the difference.
+
+Re-measure every cell as it now is and pad it to the width the
+table's separator row gives its column, in the window that shows the
+buffer (pixels), or in columns when the buffer is shown nowhere.
+Wrapping and the column widths do not change — both are computed from
+the cell text — so only the padding moves, and the markdown a later
+re-layout reads (`agent-shell-markdown-table-source') is untouched.
+
+A no-op when POSITION is not inside a rendered table, and when a cell
+already holds the padding a fresh layout would give it."
+  (interactive "d")
+  (let ((window (get-buffer-window (current-buffer) t))
+        ;; agent-shell tags its body chars with a `field' property, and the
+        ;; `\n's between rows may carry another; without this, `forward-line'
+        ;; and `line-end-position' would stop at those boundaries.
+        (inhibit-field-text-motion t)
+        (inhibit-read-only t)
+        (buffer-undo-list t)
+        (modified (buffer-modified-p)))
+    (save-excursion
+      (let ((pos (max (point-min) (min position (1- (point-max))))))
+        ;; A caller's POSITION may be the end of the region it rendered, so
+        ;; one past a table character; step back onto the table then.
+        (unless (get-text-property pos 'agent-shell-markdown-table-source)
+          (setq pos (max (point-min) (1- pos))))
+        (goto-char pos)
+        (when (get-text-property pos 'agent-shell-markdown-table-source)
+          (let* ((beg (or (previous-single-property-change
+                           (min (1+ (point)) (point-max))
+                           'agent-shell-markdown-table-source nil (point-min))
+                          (point-min)))
+                 (end (or (next-single-property-change
+                           beg 'agent-shell-markdown-table-source nil (point-max))
+                          (point-max)))
+                 (border (char-after beg))
+                 (widths (agent-shell-markdown--realign-table-widths beg end)))
+            (when widths
+            ;; Collect the lines first, then re-pad them bottom-up, and
+            ;; right-to-left within a line: an edit moves everything after
+            ;; it, so this never moves what is still to be measured.
+            (let ((lines '()))
+              (goto-char beg)
+              (while (< (point) end)
+                (push (cons (line-beginning-position) (line-end-position)) lines)
+                (forward-line 1))
+              (dolist (line lines)
+                (let ((line-start (car line))
+                      (line-end (cdr line)))
+                  (unless (agent-shell-markdown--rendered-separator-line-p
+                           line-start line-end)
+                    (dolist (cell-width (reverse
+                                         (seq-mapn #'cons
+                                                   (agent-shell-markdown--realign-row-cells
+                                                    line-start line-end)
+                                                   widths)))
+                      (when (cdr cell-width)
+                        (agent-shell-markdown--realign-cell
+                         (car (car cell-width)) (cdr (car cell-width))
+                         (cdr cell-width) window)))))))
+            (restore-buffer-modified-p modified))))))))
 
 (defun agent-shell-markdown--displayed-window-width ()
   "Return the body pixel width of a window showing the current buffer, or nil.

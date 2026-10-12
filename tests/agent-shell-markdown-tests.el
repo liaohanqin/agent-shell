@@ -3165,6 +3165,89 @@ after" nil)))))
             (setq pos (or next (length rendered)))))
         (should (= runs 1))))))
 
+(defun agent-shell-markdown-tests--table-string-width (str image-width char-px)
+  "Return the rendered width of STR with IMAGE-WIDTH for any replacement.
+Models what the pixel path measures: a `display' replacement is one
+image, whatever its text, and a `(space :width (N))' is N pixels;
+every other character is CHAR-PX wide."
+  (let ((total 0)
+        (pos 0)
+        (len (length str)))
+    (while (< pos len)
+      (let* ((next (or (next-single-property-change pos 'display str len) len))
+             (display (get-text-property pos 'display str)))
+        (setq total
+              (+ total
+                 (cond ((and (consp display) (eq (car display) 'space))
+                        (car (plist-get (cdr display) :width)))
+                       (display image-width)
+                       (t (* char-px (- next pos))))))
+        (setq pos next)))
+    total))
+
+(ert-deftest agent-shell-markdown-table-realign-pads-for-a-late-replacement ()
+  ;; A `display' replacement that lands after the table was laid out (the
+  ;; math renderer draws from a timer) is usually narrower than the text it
+  ;; covers, so the padding computed then no longer fills the column and
+  ;; the row's right border drifts left.  Re-aligning re-measures the cells
+  ;; as they now are and pads to the width the separator row gives.
+  (with-temp-buffer
+    (insert "| a | b |\n|---|---|\n| x+y+z+w | text |\n")
+    (let ((width-of (lambda (start end)
+                      (agent-shell-markdown-tests--table-string-width
+                       (buffer-substring start end) 20 6))))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'window-live-p) (lambda (&rest _) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 90))
+                ((symbol-function 'agent-shell-markdown--display-width)
+                 (lambda (&optional _window) 30))
+                ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+                 (lambda (&rest _) 6))
+                ((symbol-function 'window-text-pixel-size)
+                 (lambda (_window &optional from to &rest _)
+                   (list (agent-shell-markdown-tests--table-string-width
+                          (buffer-substring (or from (point-min))
+                                            (or to (point-max)))
+                          20 6)
+                         0)))
+                ((symbol-function 'agent-shell-markdown--table-measure-string)
+                 (lambda (str &rest _)
+                   (agent-shell-markdown-tests--table-string-width
+                    str 20 6))))
+        (agent-shell-markdown-replace-markup :force t)
+        ;; The formula gets its image only now, as a timer would draw it.
+        (goto-char (point-min))
+        (should (search-forward "x+y+z+w" nil t))
+        (put-text-property (match-beginning 0) (match-end 0) 'display 'image)
+        (let* ((row-start (line-beginning-position))
+               (row-end (line-end-position))
+               (separator (save-excursion
+                            (goto-char (point-min))
+                            (forward-line 1)
+                            (list (line-beginning-position) (line-end-position))))
+               (row-width (lambda () (funcall width-of row-start row-end)))
+               (separator-width (apply width-of separator)))
+          ;; The row is short of the separator's width by the difference
+          ;; between the text the layout measured and the image…
+          (should (< (funcall row-width) separator-width))
+          ;; …and re-aligning pads the cell to its column again (the row
+          ;; line grows, so re-read its end).
+          (agent-shell-markdown-realign-table-at row-start)
+          (setq row-end (save-excursion (goto-char row-start) (line-end-position)))
+          (should (= (funcall row-width) separator-width)))))))
+
+(ert-deftest agent-shell-markdown-table-realign-keeps-a-table-as-laid-out ()
+  ;; Re-aligning a table nothing has touched since it was laid out leaves
+  ;; it exactly as it is, extra padding and all.
+  (with-temp-buffer
+    (insert "| a | b |\n|---|---|\n| 控制点 | text |\n| long cell | x |\n")
+    (let ((before nil))
+      (agent-shell-markdown-replace-markup :force t)
+      (setq before (buffer-string))
+      (agent-shell-markdown-realign-table-at (point-min))
+      (should (equal (buffer-string) before)))))
+
 (ert-deftest agent-shell-markdown-mirrors-face-to-font-lock-face ()
   ;; Faces are mirrored to `font-lock-face' so our styling survives
   ;; `font-lock-mode' re-fontification in comint / shell-maker buffers.
