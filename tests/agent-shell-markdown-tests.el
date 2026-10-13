@@ -3237,6 +3237,66 @@ every other character is CHAR-PX wide."
           (setq row-end (save-excursion (goto-char row-start) (line-end-position)))
           (should (= (funcall row-width) separator-width)))))))
 
+(ert-deftest agent-shell-markdown-table-realign-keeps-cell-props-paired ()
+  ;; A cell can carry the image and the hint an external renderer laid
+  ;; over a formula — `display', `mouse-face', `help-echo' — and the
+  ;; re-pad reads them back off the cell: its padding, or its last content
+  ;; char when there is no padding to take them from.  Stripping those
+  ;; keys without their values unpaired the plist handed to `propertize'
+  ;; (`wrong-number-of-arguments propertize 30') instead of re-padding.
+  (with-temp-buffer
+    (insert "| a | b |\n|---|---|\n| x+y+z+w | text |\n")
+    (let ((width-of (lambda (start end)
+                      (agent-shell-markdown-tests--table-string-width
+                       (buffer-substring start end) 20 6))))
+      (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'window-live-p) (lambda (&rest _) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 90))
+                ((symbol-function 'agent-shell-markdown--display-width)
+                 (lambda (&optional _window) 30))
+                ((symbol-function 'agent-shell-markdown--table-char-pixel-width)
+                 (lambda (&rest _) 6))
+                ((symbol-function 'window-text-pixel-size)
+                 (lambda (_window &optional from to &rest _)
+                   (list (agent-shell-markdown-tests--table-string-width
+                          (buffer-substring (or from (point-min))
+                                            (or to (point-max)))
+                          20 6)
+                         0)))
+                ((symbol-function 'agent-shell-markdown--table-measure-string)
+                 (lambda (str &rest _)
+                   (agent-shell-markdown-tests--table-string-width
+                    str 20 6))))
+        (agent-shell-markdown-replace-markup :force t)
+        ;; The image lands over the formula only now, and its hint with it,
+        ;; over the cell the re-pad reads its properties from.
+        (goto-char (point-min))
+        (should (search-forward "x+y+z+w" nil t))
+        (let* ((row-start (line-beginning-position))
+               (cell-end (cdr (car (agent-shell-markdown--realign-row-cells
+                                    row-start (line-end-position)))))
+               (separator (save-excursion
+                            (goto-char (point-min))
+                            (forward-line 1)
+                            (list (line-beginning-position) (line-end-position))))
+               (separator-width (apply width-of separator)))
+          (put-text-property (match-beginning 0) cell-end 'display 'image)
+          (put-text-property (match-beginning 0) cell-end 'mouse-face 'highlight)
+          (put-text-property (match-beginning 0) cell-end 'help-echo "hint")
+          (agent-shell-markdown-realign-table-at row-start)
+          ;; The cell is padded to its column again…
+          (let ((row-end (save-excursion
+                           (goto-char row-start) (line-end-position))))
+            (should (= (funcall width-of row-start row-end) separator-width)))
+          ;; …and the fresh padding carries neither the hint nor the mouse
+          ;; face, nor the image.
+          (goto-char row-start)
+          (should (search-forward "x+y+z+w" nil t))
+          (should-not (get-text-property (match-end 0) 'help-echo))
+          (should-not (get-text-property (match-end 0) 'mouse-face))
+          (should-not (eq 'image (get-text-property (match-end 0) 'display))))))))
+
 (ert-deftest agent-shell-markdown-table-realign-keeps-a-table-as-laid-out ()
   ;; Re-aligning a table nothing has touched since it was laid out leaves
   ;; it exactly as it is, extra padding and all.

@@ -3812,10 +3812,20 @@ image's `display', its tooltip)."
       (delete-region pad-start cell-end)
       (goto-char pad-start)
       (insert (if props
+                  ;; Drop the three as key/value pairs: removing the key
+                  ;; alone (which `seq-remove' does) leaves its value
+                  ;; behind in the list, unbalancing the plist —
+                  ;; `propertize' then gets an even argument count.
                   (apply #'propertize new-padding
-                         (seq-remove (lambda (prop)
-                                       (memq prop '(display mouse-face help-echo)))
-                                     props))
+                         (let ((rest props)
+                               (kept nil))
+                           (while rest
+                             (unless (memq (car rest)
+                                           '(display mouse-face help-echo))
+                               (setq kept (cons (cadr rest)
+                                                (cons (car rest) kept))))
+                             (setq rest (cddr rest)))
+                           (nreverse kept)))
                 new-padding))
       ;; The insert sits right after the content, so it also inherits the
       ;; content's properties — the image's `display', its tooltip, its
