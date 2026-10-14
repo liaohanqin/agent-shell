@@ -2509,15 +2509,41 @@ Returns one of:
           'busy
         'ready)))))
 
+(defun agent-shell--steering-dialect (state)
+  "Return the steering dialect STATE's agent speaks, if any.
+
+`session-steering' - the agent advertised the `_session/steering'
+extension, which it does in the `initialize' response's top-level
+`_meta' as `steering.supported' (Claude and Codex).
+`session-steer'    - CodeBuddy, which implements steering as a method
+of its own without advertising anything, so it is matched on the agent
+identifier, as `agent-shell-new-session-delays' matches its
+plugin-loading quirk.
+nil                - the agent cannot steer.
+
+The advertised extension wins when both fit, so an agent that starts
+advertising steering keeps the dialect its advertisement names.
+
+See `agent-shell-experimental--send-steering', which sends whatever
+this names."
+  (cond
+   ((map-elt state :supports-steering)
+    'session-steering)
+   ((eq (map-nested-elt state '(:agent-config :identifier)) 'codebuddy)
+    'session-steer)))
+
 (cl-defun agent-shell-steering-supported-p (&key shell-buffer)
   "Return non-nil when the agent accepts a prompt steered into a running turn.
 When SHELL-BUFFER is non-nil, check that buffer instead of the current one.
 
-Steering is an ACP extension rather than part of the spec, so the agent
-advertises it in the `initialize' response's top-level `_meta' as
-`steering.supported'.  See `agent-shell-experimental--send-steering'."
+Steering is an ACP extension rather than part of the spec, so an agent
+either advertises it in the `initialize' response's top-level `_meta'
+as `steering.supported' (Claude and Codex), or is known to implement it
+without advertising anything (CodeBuddy, through a `session/steer'
+method of its own).  `agent-shell--steering-dialect' tells which, and
+`agent-shell-experimental--send-steering' sends it."
   (with-current-buffer (or shell-buffer (current-buffer))
-    (map-elt agent-shell--state :supports-steering)))
+    (agent-shell--steering-dialect agent-shell--state)))
 
 (defun agent-shell-interrupt (&optional force)
   "Interrupt in-progress request and reject all pending permissions.
@@ -7363,7 +7389,7 @@ Must provide ON-INITIATED (lambda ())."
                       ;; what it is to a reader of this block, even though the
                       ;; wire carries it elsewhere.
                       :body (agent-shell--format-agent-capabilities
-                             (if (map-elt agent-shell--state :supports-steering)
+                             (if (agent-shell--steering-dialect agent-shell--state)
                                  (append agent-capabilities '((steering . t)))
                                agent-capabilities))))
                    (agent-shell--emit-event :event 'init-handshake))

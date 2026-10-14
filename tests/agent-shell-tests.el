@@ -8861,6 +8861,90 @@ shell is left working in a directory that was just deleted."
   (should-error (agent-shell-experimental--make-session-steering-request
                  :session-id "sess-1")))
 
+(ert-deftest agent-shell-experimental--make-session-steer-request-test ()
+  "Test `agent-shell-experimental--make-session-steer-request'."
+  (let ((request (agent-shell-experimental--make-session-steer-request
+                  :session-id "sess-1"
+                  :prompt '(((type . "text") (text . "actually, just the filenames"))))))
+    (should (equal (map-elt request :method) "session/steer"))
+    (should (equal (map-nested-elt request '(:params sessionId)) "sess-1"))
+    ;; Sent as `contentBlocks' -- CodeBuddy's name for it -- and as a vector
+    ;; so it serializes to a JSON array, like session/prompt.
+    (should (vectorp (map-nested-elt request '(:params contentBlocks))))
+    (should (equal (map-nested-elt request '(:params contentBlocks))
+                   [((type . "text") (text . "actually, just the filenames"))]))
+    ;; No `_meta' (no idleBehavior opt-in), no clientUserMessageId, and no
+    ;; expectedRequestId -- which is why "stale" can never come back.
+    (should-not (map-elt (map-elt request :params) '_meta)))
+  (should-error (agent-shell-experimental--make-session-steer-request
+                 :prompt '(((type . "text") (text . "hi")))))
+  (should-error (agent-shell-experimental--make-session-steer-request
+                 :session-id "sess-1")))
+
+(ert-deftest agent-shell-experimental--steering-outcome-test ()
+  "Test `agent-shell-experimental--steering-outcome' maps both dialects."
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steering '((outcome . "injected")))
+                 "injected"))
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steering '((outcome . "startedNewTurn")))
+                 "startedNewTurn"))
+  ;; CodeBuddy answers `steered'.  JSON false arrives as nil (acp parses with
+  ;; :false-object nil), so `((steered) ...)' is `steered: false'.
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steer '((steered . t) (ownerRequestId . "req-7")))
+                 "injected"))
+  ;; The turn ended before the steer landed and CodeBuddy started none of
+  ;; its own: the prompt is ours to submit, like promptRequired.
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steer '((steered) (reason . "idle")))
+                 "promptRequired"))
+  ;; "stale" needs an expectedRequestId this client never sends; a
+  ;; reason-less false answers content the agent could not inject.
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steer '((steered) (reason . "stale")))
+                 nil))
+  (should (equal (agent-shell-experimental--steering-outcome
+                  'session-steer '((steered)))
+                 nil)))
+
+(ert-deftest agent-shell--steering-dialect-test ()
+  "Test which steering dialect a shell state names."
+  ;; Claude and Codex advertise the extension.
+  (should (eq (agent-shell--steering-dialect '((:supports-steering . t)))
+              'session-steering))
+  ;; CodeBuddy implements `session/steer' without advertising, so it is
+  ;; matched on the identifier, like `agent-shell-new-session-delays'.
+  (should (eq (agent-shell--steering-dialect
+               '((:agent-config (:identifier . codebuddy))))
+              'session-steer))
+  ;; The advertised extension wins when both fit.
+  (should (eq (agent-shell--steering-dialect
+               '((:supports-steering . t)
+                 (:agent-config (:identifier . codebuddy))))
+              'session-steering))
+  (should-not (agent-shell--steering-dialect
+               '((:agent-config (:identifier . claude)))))
+  (should-not (agent-shell--steering-dialect '())))
+
+(ert-deftest agent-shell-steering-supported-p-test ()
+  "Test the steering gate reads the buffer's shell state."
+  (let ((buffer (generate-new-buffer " *agent-shell-steering-gate-test*")))
+    (unwind-protect
+        (with-current-buffer buffer
+          (setq-local agent-shell--state
+                      (list (cons :supports-steering nil)
+                            (cons :agent-config '((:identifier . codebuddy)))))
+          (should (agent-shell-steering-supported-p))
+          ;; The SHELL-BUFFER argument checks that buffer.
+          (should (agent-shell-steering-supported-p :shell-buffer buffer))
+          (setq-local agent-shell--state (list (cons :supports-steering t)))
+          (should (agent-shell-steering-supported-p))
+          (setq-local agent-shell--state
+                      (list (cons :agent-config '((:identifier . claude)))))
+          (should-not (agent-shell-steering-supported-p)))
+      (kill-buffer buffer))))
+
 (cl-defun agent-shell-tests--steer-guard (&key busy supported status confirm
                                                (prompt "actually, just the filenames"))
   "Invoke `agent-shell-prompt-steer' on PROMPT and report what its guards decided.
@@ -8936,7 +9020,8 @@ refused, leaving the text recoverable from `minibuffer-history' alone."
                      (user-error (error-message-string error)))
                    "This agent does not support steering"))))
 
-(cl-defun agent-shell-tests--steer-outcome (&key outcome busy request-failed)
+(cl-defun agent-shell-tests--steer-outcome (&key outcome response identifier
+                                                busy request-failed)
   "Steer a prompt, answer with OUTCOME, and return what became of it.
 
 OUTCOME is the agent's answer verbatim, as it arrives on the wire.  BUSY
@@ -8944,6 +9029,12 @@ is what `shell-maker-busy' reports while the answer is handled: a shell
 that has not yet processed its own `session/prompt' response is still
 busy even though the agent says the turn ended.  REQUEST-FAILED answers
 the request itself with an error instead.
+
+RESPONSE, when non-nil, is the answer verbatim for dialects that do not
+answer with OUTCOME, overriding it.  IDENTIFIER, when non-nil, is the
+agent identifier the mock shell state reports, which is what selects
+the steering dialect: `codebuddy' steers with `session/steer' and
+answers with RESPONSE.
 
 Returns the things that happened, in order: `rendered' (shown as a user
 prompt in the running turn), `submitted' (sent as an ordinary prompt),
@@ -8957,10 +9048,14 @@ fragment) and `interrupted' (the running turn cancelled)."
     (cl-letf (((symbol-function 'agent-shell--shell-buffer)
                (lambda (&rest _) (current-buffer)))
               ((symbol-function 'agent-shell--state)
-               (lambda (&rest _) (list (cons :buffer (current-buffer))
-                                       (cons :session (list (cons :id "sess-1")))
-                                       (cons :request-count 0)
-                                       (cons :last-entry-type nil))))
+               (lambda (&rest _)
+                 (append (list (cons :buffer (current-buffer))
+                               (cons :session (list (cons :id "sess-1")))
+                               (cons :request-count 0)
+                               (cons :last-entry-type nil))
+                         (when identifier
+                           (list (cons :agent-config
+                                       (list (cons :identifier identifier))))))))
               ((symbol-function 'agent-shell-steering-supported-p)
                (lambda (&rest _) t))
               ((symbol-function 'agent-shell-status) (lambda (&rest _) 'busy))
@@ -8980,7 +9075,7 @@ fragment) and `interrupted' (the running turn cancelled)."
                      (funcall (plist-get args :on-failure)
                               '((message . "agent said no")) "raw")
                    (funcall (plist-get args :on-success)
-                            (list (cons 'outcome outcome))))))
+                            (or response (list (cons 'outcome outcome)))))))
               ((symbol-function 'agent-shell-experimental--render-steered-prompt)
                (lambda (&rest _) (push 'rendered happened)))
               ((symbol-function 'agent-shell--insert-to-shell-buffer)
@@ -9017,6 +9112,41 @@ fragment) and `interrupted' (the running turn cancelled)."
                  '(reported interrupted)))
   ;; Submitting into a still-busy shell would error, so it reports too.
   (should (equal (agent-shell-tests--steer-outcome :outcome "promptRequired" :busy t)
+                 '(reported interrupted))))
+
+(ert-deftest agent-shell-prompt-steer-codebuddy-outcome-test ()
+  "Test CodeBuddy's `session/steer' answers act like steering outcomes."
+  ;; `steered': the prompt joined the turn that was running.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy
+                  :response '((steered . t) (ownerRequestId . "req-7")))
+                 '(rendered)))
+  ;; The turn ended before the steer landed and CodeBuddy did not start one
+  ;; of its own, so the prompt is ours to submit, as with promptRequired.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy
+                  :response '((steered) (reason . "idle")))
+                 '(submitted)))
+  ;; No expectedRequestId was sent, so "stale" cannot happen; were it to,
+  ;; it must not read as delivered.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy
+                  :response '((steered) (reason . "stale")))
+                 '(reported interrupted)))
+  ;; Content the agent could not inject: false and no reason at all.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy
+                  :response '((steered)))
+                 '(reported interrupted)))
+  ;; A shell that has not yet processed its own `session/prompt' response
+  ;; cannot act on an idle hand-back, so it reports and interrupts.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy :busy t
+                  :response '((steered) (reason . "idle")))
+                 '(reported interrupted)))
+  ;; A request that never got an answer is handled like any other failure.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy :request-failed t)
                  '(reported interrupted))))
 
 (cl-defun agent-shell-tests--render-steered-prompt (prompt &key idle draft)
