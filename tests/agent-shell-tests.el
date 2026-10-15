@@ -8002,7 +8002,7 @@ comint strips the highlight off the first one."
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
                 ((symbol-function 'window-body-width) (lambda (&rest _) 800))
                 ((symbol-function 'agent-shell-markdown-rerender-tables)
-                 (lambda () (setq tables (1+ tables))))
+                 (lambda (&rest _) (setq tables (1+ tables))))
                 ((symbol-function 'agent-shell-markdown-rerender-images)
                  (lambda () (setq images (1+ images))))
                 ((symbol-function 'run-with-idle-timer)
@@ -8091,7 +8091,7 @@ comint strips the highlight off the first one."
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
                 ((symbol-function 'window-body-width) (lambda (&rest _) 800))
                 ((symbol-function 'agent-shell-markdown-rerender-tables)
-                 (lambda ()
+                 (lambda (&rest _)
                    (setq tables (1+ tables)
                          agent-shell-markdown--tables-rendered nil)))
                 ((symbol-function 'agent-shell-markdown-rerender-images)
@@ -8109,6 +8109,26 @@ comint strips the highlight off the first one."
         (agent-shell--realign-on-change 'window)
         (should (= scheduled 2))))))
 
+(ert-deftest agent-shell--realign-scopes-table-scan-when-width-is-unchanged ()
+  "The worker narrows the table scan to recorded renders, unless resized."
+  (with-temp-buffer
+    (let ((width 800)
+          (args nil))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) width))
+                ((symbol-function 'agent-shell-markdown-rerender-images) #'ignore)
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest a) (push a args))))
+        (setq agent-shell--realign-width 800)
+        (setq agent-shell-markdown--tables-rendered (list (copy-marker (point-min))))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (equal args '((:dirty-only t))))
+        ;; A width change must re-check every table, wherever it sits.
+        (setq args nil
+              width 900)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (equal args '((:dirty-only nil))))))))
+
 (ert-deftest agent-shell--realign-resize-rechecks-tables-and-images ()
   "A changed window width still rechecks both kinds of rendered content."
   (with-temp-buffer
@@ -8120,7 +8140,7 @@ comint strips the highlight off the first one."
                 ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
                 ((symbol-function 'window-body-width) (lambda (&rest _) width))
                 ((symbol-function 'agent-shell-markdown-rerender-tables)
-                 (lambda () (setq tables (1+ tables))))
+                 (lambda (&rest _) (setq tables (1+ tables))))
                 ((symbol-function 'agent-shell-markdown-rerender-images)
                  (lambda () (setq images (1+ images))))
                 ((symbol-function 'run-with-idle-timer)
@@ -8143,7 +8163,7 @@ comint strips the highlight off the first one."
                  (lambda (&rest _) (and displayed 'window)))
                 ((symbol-function 'window-body-width) (lambda (&rest _) 800))
                 ((symbol-function 'agent-shell-markdown-rerender-tables)
-                 (lambda () (setq tables (1+ tables))))
+                 (lambda (&rest _) (setq tables (1+ tables))))
                 ((symbol-function 'agent-shell-markdown-rerender-images) #'ignore))
         (agent-shell--realign-rendered (current-buffer))
         (should (= tables 0))
@@ -8165,7 +8185,7 @@ comint strips the highlight off the first one."
                 ((symbol-function 'agent-shell-viewport--shell-buffer) #'ignore)
                 ((symbol-function 'agent-shell-viewport--update-header) #'ignore)
                 ((symbol-function 'agent-shell-markdown-rerender-tables)
-                 (lambda () (setq tables (1+ tables))))
+                 (lambda (&rest _) (setq tables (1+ tables))))
                 ((symbol-function 'agent-shell-markdown-rerender-images)
                  (lambda () (setq images (1+ images))))
                 ((symbol-function 'run-with-idle-timer)
@@ -8257,6 +8277,252 @@ move the binding to a different option."
                    (mapcar (lambda (action) (map-elt action :option)) actions)))
     (should (equal "y" (map-elt (nth 0 actions) :char)))
     (should-not (map-elt (nth 1 actions) :char))))
+
+(ert-deftest agent-shell--render-throttled-renders-first-call-immediately ()
+  "A burst's first render is not delayed: only repeats are coalesced."
+  (with-temp-buffer
+    (let ((calls 0)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last 0))
+      (insert "chunk")
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq calls (1+ calls)))))
+        (agent-shell--render-markdown-throttled)
+        (should (= calls 1))
+        (should-not agent-shell--render-throttle-requests)))))
+
+(ert-deftest agent-shell--render-throttled-coalesces-repeats-into-one-flush ()
+  "Repeats inside the interval collapse, and the flush renders the rest.
+The region is recorded as markers, so the coalesced render covers
+text appended after the request that was superseded."
+  (with-temp-buffer
+    (let ((calls 0)
+          (seen nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last 0))
+      (insert "one")
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _)
+                   (setq calls (1+ calls))
+                   (push (buffer-substring-no-properties (point-min) (point-max)) seen))))
+        (agent-shell--render-markdown-throttled)
+        (insert " two")
+        (agent-shell--render-markdown-throttled)
+        (insert " three")
+        (agent-shell--render-markdown-throttled)
+        ;; Two repeats coalesced into one pending request.
+        (should (= calls 1))
+        (should agent-shell--render-throttle-requests)
+        (agent-shell--render-flush)
+        (should (= calls 2))
+        ;; The flushed render covered everything, not just the first repeat.
+        (should (equal (car seen) "one two three"))
+        (should-not agent-shell--render-throttle-requests)))))
+
+(ert-deftest agent-shell--render-throttled-flush-without-pending-is-a-noop ()
+  (with-temp-buffer
+    (let ((calls 0))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq calls (1+ calls)))))
+        (agent-shell--render-flush)
+        (should (= calls 0))))))
+
+(ert-deftest agent-shell--render-throttled-flush-rebinds-read-only ()
+  "A deferred render must rebind `inhibit-read-only' for itself.
+The body carries `read-only', so the immediate path only works
+because its caller happens to bind that; the timer has no caller."
+  (with-temp-buffer
+    (let ((checked nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (insert "body")
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq checked inhibit-read-only))))
+        (agent-shell--render-markdown-throttled)
+        (should agent-shell--render-throttle-requests)
+        (agent-shell--render-flush)
+        (should checked)))))
+
+(ert-deftest agent-shell--render-throttled-passing-args-through ()
+  "The deferred render re-applies the options the caller passed."
+  (with-temp-buffer
+    (let ((args nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last 0))
+      (insert "body")
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest a) (setq args a))))
+        (setq agent-shell--render-throttle-requests nil)
+        (agent-shell--render-markdown-throttled :render-images nil :complete nil)
+        ;; First call rendered immediately with the caller's options.
+        (should (equal args (list :render-images nil :complete nil)))))))
+
+(ert-deftest agent-shell--render-throttled-pending-region-waits-for-trailing-timer ()
+  "A pending region the new call does not cover is kept, not dropped.
+It is rendered by the trailing timer rather than on the spot, since
+this call runs inside a caller whose other positions are integers."
+  (with-temp-buffer
+    (insert "AAAA.....BBBB")
+    (let ((renders nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _)
+                   (push (buffer-substring-no-properties (point-min) (point-max))
+                         renders))))
+        (save-restriction
+          (narrow-to-region 1 5)
+          (agent-shell--render-markdown-throttled))
+        (should agent-shell--render-throttle-requests)
+        (save-restriction
+          (narrow-to-region 10 14)
+          (agent-shell--render-markdown-throttled))
+        (should-not renders)
+        (should (= 2 (length agent-shell--render-throttle-requests)))
+        (agent-shell--render-flush)
+        (should (equal renders '("BBBB" "AAAA")))))))
+
+(ert-deftest agent-shell--render-throttled-covered-pending-is-superseded ()
+  "A pending region inside the new one needs no separate render."
+  (with-temp-buffer
+    (insert "one two")
+    (let ((renders 0)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq renders (1+ renders)))))
+        (save-restriction
+          (narrow-to-region 1 4)
+          (agent-shell--render-markdown-throttled))
+        (save-restriction
+          (narrow-to-region 1 8)
+          (agent-shell--render-markdown-throttled))
+        (should (= renders 0))
+        (agent-shell--render-flush)
+        (should (= renders 1))))))
+
+(ert-deftest agent-shell--render-throttled-trailing-timer-renders ()
+  "The trailing timer renders what coalescing held back."
+  (with-temp-buffer
+    (insert "text")
+    (let ((renders 0)
+          (callback nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq renders (1+ renders))))
+                ((symbol-function 'run-at-time)
+                 (lambda (_delay _repeat fn &rest _)
+                   (setq callback fn)
+                   (timer-create))))
+        (agent-shell--render-markdown-throttled)
+        (should (= renders 0))
+        (should callback)
+        (funcall callback)
+        (should (= renders 1))
+        (should-not agent-shell--render-throttle-requests)))))
+
+(ert-deftest agent-shell--render-throttled-zero-interval-renders-each-request ()
+  "A zero interval restores one render per request."
+  (with-temp-buffer
+    (insert "text")
+    (let ((renders 0)
+          (agent-shell--render-throttle-interval 0))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (setq renders (1+ renders)))))
+        (dotimes (_ 3)
+          (agent-shell--render-markdown-throttled))
+        (should (= renders 3))
+        (should-not agent-shell--render-throttle-requests)))))
+
+(ert-deftest agent-shell--render-throttled-deferred-render-keeps-args ()
+  "The deferred render re-applies the options the coalesced call passed."
+  (with-temp-buffer
+    (insert "text")
+    (let ((args nil)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest a) (setq args a))))
+        (agent-shell--render-markdown-throttled :render-images nil :complete nil)
+        (should agent-shell--render-throttle-requests)
+        (should-not args)
+        (agent-shell--render-flush)
+        (should (equal args '(:render-images nil :complete nil)))))))
+
+(ert-deftest agent-shell--render-throttled-flush-redoes-undo-reset ()
+  "A deferred render that changes text must redo the prompt undo entry.
+The render shifts the input area, which leaves the entry
+`agent-shell--reset-undo-history' recorded pointing at other text."
+  (with-temp-buffer
+    (insert "body")
+    (let ((resets 0)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _) (insert "styled")))
+                ((symbol-function 'agent-shell--reset-undo-history)
+                 (lambda () (setq resets (1+ resets)))))
+        (agent-shell--render-markdown-throttled)
+        (agent-shell--render-flush)
+        (should (= resets 1))))))
+
+(ert-deftest agent-shell--render-throttled-flush-with-unchanged-text-keeps-undo ()
+  "A render that changed nothing leaves the undo entry alone."
+  (with-temp-buffer
+    (insert "body")
+    (let ((resets 0)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown) #'ignore)
+                ((symbol-function 'agent-shell--reset-undo-history)
+                 (lambda () (setq resets (1+ resets)))))
+        (agent-shell--render-markdown-throttled)
+        (agent-shell--render-flush)
+        (should (= resets 0))))))
+
+(ert-deftest agent-shell--render-throttled-trailing-keeps-earliest-deadline ()
+  "A newer request must not push back an armed flush.
+Re-arming per request would starve a region that stops updating, and
+cross-region requests are only rendered by that flush."
+  (with-temp-buffer
+    (insert "text")
+    (let ((arms 0)
+          (agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'run-at-time)
+                 (lambda (&rest _) (setq arms (1+ arms)) (timer-create))))
+        (dotimes (_ 3)
+          (agent-shell--render-markdown-throttled))
+        (should (= 1 arms))
+        (should (= 1 (length agent-shell--render-throttle-requests)))))))
+
+(ert-deftest agent-shell--render-throttled-due-keeps-uncovered-pending ()
+  "A due render supersedes only what it covers, and re-arms for the rest."
+  (with-temp-buffer
+    (insert "AAAA.....BBBB")
+    (let ((renders nil)
+          (arms 0)
+          (agent-shell--render-throttle-interval 0.01)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _)
+                   (push (buffer-substring-no-properties (point-min) (point-max))
+                         renders)))
+                ((symbol-function 'run-at-time)
+                 (lambda (&rest _) (setq arms (1+ arms)) (timer-create))))
+        (save-restriction
+          (narrow-to-region 1 5)
+          (agent-shell--render-markdown-throttled))
+        (should (= 1 (length agent-shell--render-throttle-requests)))
+        ;; Due, and this region does not cover the recorded one.
+        (setq agent-shell--render-throttle-last 0)
+        (save-restriction
+          (narrow-to-region 10 14)
+          (agent-shell--render-markdown-throttled))
+        (should (equal renders '("BBBB")))
+        (should (= 1 (length agent-shell--render-throttle-requests)))
+        (should (= 2 arms))))))
 
 (ert-deftest agent-shell--render-markdown-runs-external-renderers-by-default ()
   "Render functions see message bodies, the default for every call site."

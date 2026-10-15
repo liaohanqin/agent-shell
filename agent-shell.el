@@ -389,6 +389,179 @@ cache so downloaded images share `agent-shell-cache-dir'."
              :complete complete
              :image-cache-directory (agent-shell-cache-dir "content"))))
 
+(defvar agent-shell--render-throttle-interval 0.04
+  "Seconds between streaming body renders.
+
+Streaming appends a chunk at a time and each append would otherwise
+run the whole markdown pipeline, hundreds of times a second.  Renders
+are capped to one per interval, with a trailing render after the last
+request, so settled text is always rendered.  Zero renders every
+request, as before.")
+
+(defvar-local agent-shell--render-throttle-last 0
+  "Time of this buffer's last streaming body render.")
+
+(defvar-local agent-shell--render-throttle-requests nil
+  "Pending throttled renders, oldest first, as alists of :begin, :end, :args.")
+
+(defvar-local agent-shell--render-throttle-timer nil
+  "Timer that flushes `agent-shell--render-throttle-requests'.")
+
+(defun agent-shell--render-throttle-release (request)
+  "Release REQUEST's region markers, when it has any."
+  (when request
+    (dolist (key '(:begin :end))
+      (let ((marker (map-elt request key)))
+        (when (markerp marker)
+          (set-marker marker nil))))))
+
+(defun agent-shell--render-throttle-forget-covered (begin end)
+  "Drop pending renders that [BEGIN, END) covers, releasing their markers.
+Rendering [BEGIN, END) renders their text too, so they need no render
+of their own."
+  (let ((kept nil))
+    (dolist (request agent-shell--render-throttle-requests)
+      (if (agent-shell--render-throttle-covers-p request begin end)
+          (agent-shell--render-throttle-release request)
+        (push request kept)))
+    (setq agent-shell--render-throttle-requests (nreverse kept))))
+
+(defun agent-shell--render-throttle-run (request)
+  "Render REQUEST's region, and return non-nil when it did.
+
+Rendering changes text length above the input area, which leaves the
+undo entry `agent-shell--reset-undo-history' recorded pointing at the
+wrong text, so that is redone whenever this really changed something.
+Undo recording stays off for the render itself: a re-layout is not the
+user's edit."
+  (when-let* ((begin (marker-position (map-elt request :begin)))
+              (end (marker-position (map-elt request :end)))
+              ((< begin end)))
+    (let ((tick (buffer-chars-modified-tick)))
+      (save-restriction
+        (narrow-to-region begin end)
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t))
+          (save-excursion
+            (apply #'agent-shell--render-markdown (map-elt request :args)))))
+      (when (/= tick (buffer-chars-modified-tick))
+        (agent-shell--reset-undo-history))
+      t)))
+
+(defun agent-shell--render-throttle-record (args)
+  "Record ARGS over the current narrowing as a pending render."
+  (agent-shell--render-throttle-forget-covered (point-min) (point-max))
+  (setq agent-shell--render-throttle-requests
+        (append agent-shell--render-throttle-requests
+                (list (list (cons :begin (copy-marker (point-min)))
+                            (cons :end (copy-marker (point-max) t))
+                            (cons :args args))))))
+
+(defun agent-shell--render-throttle-covers-p (request begin end)
+  "Return non-nil when REQUEST's region lies inside [BEGIN, END)."
+  (let ((request-begin (marker-position (map-elt request :begin)))
+        (request-end (marker-position (map-elt request :end))))
+    (and request-begin request-end
+         (<= begin request-begin)
+         (<= request-end end))))
+
+(defun agent-shell--render-flush ()
+  "Render every pending throttled request now, oldest first.
+
+The trailing timer runs outside any caller's narrowing, so this is
+also what settles requests a caller never rendered itself."
+  (let ((rendered nil))
+    (when (timerp agent-shell--render-throttle-timer)
+      (cancel-timer agent-shell--render-throttle-timer)
+      (setq agent-shell--render-throttle-timer nil))
+    ;; Each request is taken off the list before it is rendered, so a
+    ;; render that signals leaves the rest pending instead of losing
+    ;; them.
+    (while (and agent-shell--render-throttle-requests
+                (buffer-live-p (current-buffer)))
+      (let ((request (pop agent-shell--render-throttle-requests)))
+        (unwind-protect
+            (when (agent-shell--render-throttle-run request)
+              (setq rendered t))
+          (agent-shell--render-throttle-release request))))
+    (when rendered
+      ;; Only a render that happened moves the clock, so a flush with
+      ;; nothing to do cannot postpone the next burst's first frame.
+      (setq agent-shell--render-throttle-last (float-time)))))
+
+(defun agent-shell--render-throttle-trailing (interval)
+  "Ensure a flush is armed for INTERVAL after the earliest pending render.
+
+An armed timer is left alone.  Re-arming on every request would push
+the deadline back for as long as chunks keep arriving, so a region
+that stops updating (a message tail, a replaced tool body) could keep
+its raw markup for the rest of the turn.  Keeping the earliest
+deadline bounds how long any pending region waits."
+  (unless (timerp agent-shell--render-throttle-timer)
+    (let ((buffer (current-buffer)))
+      (setq agent-shell--render-throttle-timer
+            (run-at-time interval nil
+                         (lambda ()
+                           (when (buffer-live-p buffer)
+                             (with-current-buffer buffer
+                               (agent-shell--render-flush)))))))))
+
+(defun agent-shell--render-markdown-throttled (&rest args)
+  "Render ARGS in the current narrowing, capped to one render per burst tick.
+
+The first request of a burst renders straight away, so output shows
+styled without added latency.  Requests arriving within
+`agent-shell--render-throttle-interval' of it coalesce into one
+pending render, which a trailing timer runs after they stop: the
+region is recorded as markers, so the deferred render covers whatever
+has been appended by then, and the settled text always ends rendered.
+
+A request is dropped only when a later region covers it, so no stretch
+goes unrendered.
+
+Only the region a call is made over is rendered on the spot.  A
+request for another region is left to the trailing timer: this runs
+inside a fragment update whose caller holds integer positions for the
+rest of that fragment, so rendering something above them would leave
+that caller's window stale.
+
+Only streaming body callers use this; renders marked complete, and
+those outside streaming, keep using `agent-shell--render-markdown'."
+  (let ((interval agent-shell--render-throttle-interval))
+    (cond
+     ((or (not (numberp interval))
+          (<= interval 0))
+      ;; Throttling off: render where the caller narrowed.
+      (apply #'agent-shell--render-markdown args)
+      (setq agent-shell--render-throttle-last (float-time)))
+     ((>= (- (float-time) (or agent-shell--render-throttle-last 0))
+          interval)
+      ;; Due.  A recorded region this one covers is superseded by it;
+      ;; any other waits for the trailing timer armed below.
+      ;; Cancel an armed flush first: this render can block on a remote
+      ;; image fetch, and a flush running once it returns would render
+      ;; other regions outside this caller's narrowing.  Anything still
+      ;; pending is re-armed below.
+      (when (timerp agent-shell--render-throttle-timer)
+        (cancel-timer agent-shell--render-throttle-timer)
+        (setq agent-shell--render-throttle-timer nil))
+      (let ((request (list (cons :begin (copy-marker (point-min)))
+                           (cons :end (copy-marker (point-max) t))
+                           (cons :args args))))
+        (unwind-protect
+            (progn
+              (agent-shell--render-throttle-forget-covered
+               (marker-position (map-elt request :begin))
+               (marker-position (map-elt request :end)))
+              (when (agent-shell--render-throttle-run request)
+                (setq agent-shell--render-throttle-last (float-time))))
+          (agent-shell--render-throttle-release request)))
+      (when agent-shell--render-throttle-requests
+        (agent-shell--render-throttle-trailing interval)))
+     (t
+      (agent-shell--render-throttle-record args)
+      (agent-shell--render-throttle-trailing interval)))))
+
 (defun agent-shell--render-deferred-markup ()
   "Render markup the streaming passes held back, the turn being over.
 
@@ -413,7 +586,12 @@ ending a folded tool call raw for good.
 
 For example, a body left as \"Here it is\\n\\n![plot](/tmp/plot.png)\"
 ends up showing the image, one ending in \"- Last item\" shows its
-bullet, while a body of prose is untouched."
+bullet, while a body of prose is untouched.
+
+A render still pending from the streaming throttle is flushed first:
+it targets a body this scan is about to re-render as complete, and
+letting the trailing timer fire afterwards would redo settled work."
+  (agent-shell--render-flush)
   (save-excursion
     (goto-char (point-min))
     (let ((inhibit-read-only t)
@@ -5687,7 +5865,8 @@ with GROUP-EXPANDED as the group's initial fold state."
                 ;; rendered on expand via
                 ;; `agent-shell-ui-post-expand-fragment-at-point-hook'.
                 (unless (agent-shell-ui--body-invisible-p (point-min) (point-max))
-                  (agent-shell--render-markdown :render-images render-body-images))))
+                  (agent-shell--render-markdown-throttled
+                   :render-images render-body-images))))
             ;; Note: For now, we're skipping applying markdown
             ;; on left labels as they currently carry propertized text
             ;; for statuses (ie. boxed).
@@ -5777,7 +5956,7 @@ with GROUP-EXPANDED as the group's initial fold state."
                ;; rendered on expand via
                ;; `agent-shell-ui-post-expand-fragment-at-point-hook'.
                (unless (agent-shell-ui--body-invisible-p (point-min) (point-max))
-                 (agent-shell--render-markdown))
+                 (agent-shell--render-markdown-throttled))
                (widen))
              ;;
              ;; Note: For now, we're skipping applying markdown
@@ -12039,7 +12218,7 @@ Deferred worker for `agent-shell--realign-on-change'."
                   (width (window-body-width window t)))
         (let ((resized (not (eql width agent-shell--realign-width))))
           (when (or resized agent-shell-markdown--tables-rendered)
-            (agent-shell-markdown-rerender-tables))
+            (agent-shell-markdown-rerender-tables :dirty-only (not resized)))
           (when (or resized agent-shell-markdown--images-pending)
             (agent-shell-markdown-rerender-images))
           (setq agent-shell--realign-width width))))))
