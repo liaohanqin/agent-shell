@@ -3471,6 +3471,61 @@ every other character is CHAR-PX wide."
         (agent-shell-markdown-rerender-tables)
         (should (= calls 0))))))
 
+(defun agent-shell-markdown-tests--table-start-markers ()
+  "Return a marker at each rendered table's start, in buffer order."
+  (let ((markers nil))
+    (save-excursion
+      (goto-char (point-min))
+      (let (match)
+        (while (setq match (text-property-search-forward
+                            'agent-shell-markdown-table-source))
+          (push (copy-marker (prop-match-beginning match)) markers))))
+    (nreverse markers)))
+
+(defun agent-shell-markdown-tests--two-mismatched-tables (dirty-table)
+  "Set up two tables whose stored width is stale, marking DIRTY-TABLE.
+DIRTY-TABLE is 0 or 1.  Returns the list of table start positions and
+leaves `agent-shell-markdown--tables-rendered' holding DIRTY-TABLE's
+marker."
+  (insert "| A | B |\n|---|---|\n| 1 | 2 |\n\n| C | D |\n|---|---|\n| 3 | 4 |\n")
+  (agent-shell-markdown-replace-markup)
+  (let ((markers (agent-shell-markdown-tests--table-start-markers)))
+    (should (= 2 (length markers)))
+    ;; Window is 500 wide; a stored 400 can only come from another width,
+    ;; so the width check alone flags both tables as stale.
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-table-width 400)
+    (setq agent-shell-markdown--tables-rendered (list (nth dirty-table markers)))
+    (mapcar #'marker-position markers)))
+
+(ert-deftest agent-shell-markdown-rerender-tables-dirty-only-starts-at-record ()
+  "With only recorded renders pending, the scan starts at the earliest one.
+A table above the earliest record cannot be stale: its stored width
+differs only if it was rendered since the last pass, which recorded it."
+  (with-temp-buffer
+    (let* ((positions (agent-shell-markdown-tests--two-mismatched-tables 1))
+           (touched nil))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'w))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+                ((symbol-function 'agent-shell-markdown--render-table)
+                 (lambda (table) (push (map-elt table :start) touched))))
+        (agent-shell-markdown-rerender-tables :dirty-only t)
+        ;; Only the recorded table, even though the earlier one is stale.
+        (should (equal touched (list (nth 1 positions))))))))
+
+(ert-deftest agent-shell-markdown-rerender-tables-full-pass-checks-every-table ()
+  "Without the dirty-only scope, a stale table above any record still settles.
+A resize or first display must re-check tables the scan never reached."
+  (with-temp-buffer
+    (let* ((positions (agent-shell-markdown-tests--two-mismatched-tables 1))
+           (touched nil))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'w))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 500))
+                ((symbol-function 'agent-shell-markdown--render-table)
+                 (lambda (table) (push (map-elt table :start) touched))))
+        (agent-shell-markdown-rerender-tables)
+        (should (seq-set-equal-p touched positions))))))
+
 (ert-deftest agent-shell-markdown-carry-properties-drops-font-lock-face ()
   ;; `font-lock-face' is our own styling (mirrored from `face'), not a
   ;; caller property, so it must not ride along on the delete+insert.

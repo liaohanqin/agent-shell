@@ -3620,7 +3620,7 @@ rendered region from inheriting either of our two properties."
        table-start end 'cursor-sensor-functions))
     (push (copy-marker table-start) agent-shell-markdown--tables-rendered)))
 
-(defun agent-shell-markdown-rerender-tables ()
+(cl-defun agent-shell-markdown-rerender-tables (&key dirty-only)
   "Re-lay out tables whose stored width or recorded renders are stale.
 
 Each rendered table carries its markdown on
@@ -3636,6 +3636,13 @@ mid-stream can leave on rows of inconsistent layouts that the width
 check alone can't detect.  Tables already correct and untouched
 since the last call are left alone.
 
+With DIRTY-ONLY non-nil, only a recorded render can have gone stale,
+so the scan starts at the earliest of them rather than at `point-min'.
+A table above that record cannot need re-laying out: it would have to
+have been rendered since the last pass, which records every render.
+A resize or a first display must leave this nil, so that a table
+whose stored width no longer matches is found wherever it sits.
+
 A no-op when the buffer isn't displayed (nothing to measure
 against), so it is safe to call on display and on resize."
   (when-let* ((window (get-buffer-window (current-buffer) t))
@@ -3647,7 +3654,12 @@ against), so it is safe to call on display and on resize."
       ;; Collect the stale tables' bounds (as markers, so re-rendering
       ;; one doesn't invalidate the others) and stashed source.
       (save-excursion
-        (goto-char (point-min))
+        ;; A dirty-only pass starts at the earliest pending render, which
+        ;; streaming leaves near the end where output is appended: the
+        ;; tables above it are settled and scanning them is wasted work.
+        (goto-char (if (and dirty-only dirty)
+                       (apply #'min (mapcar #'marker-position dirty))
+                     (point-min)))
         (let (match)
           (while (setq match (text-property-search-forward
                               'agent-shell-markdown-table-source))
