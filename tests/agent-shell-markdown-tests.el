@@ -911,6 +911,7 @@ it is still picked up by the bare-URL linkifier."
           (with-temp-buffer
             (insert (format "![a](%s){width=50%%}" image-file))
             (agent-shell-markdown-replace-markup :render-images t)
+            (should agent-shell-markdown--images-pending)
             (should (= 0.5 (get-text-property
                             (point-min) 'agent-shell-markdown-image-width-ratio)))
             (should (= 1000 (get-text-property
@@ -933,9 +934,33 @@ it is still picked up by the bare-URL linkifier."
           (with-temp-buffer
             (insert (format "![a](%s){width=300px}" image-file))
             (agent-shell-markdown-replace-markup :render-images t)
+            (should-not agent-shell-markdown--images-pending)
             (should (null (get-text-property
                            (point-min) 'agent-shell-markdown-image-width-ratio)))))
       (delete-file image-file))))
+
+(ert-deftest agent-shell-markdown-rerender-images-pending-until-settled ()
+  "Off-screen and failed re-layouts must preserve pending image work."
+  (with-temp-buffer
+    (insert (propertize "I" 'agent-shell-markdown-image-width-ratio 0.5
+                        'agent-shell-markdown-image-window-width 400))
+    (setq-local agent-shell-markdown--images-pending t)
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+      (agent-shell-markdown-rerender-images)
+      (should agent-shell-markdown--images-pending))
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+              ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+              ((symbol-function 'agent-shell-markdown--resize-image)
+               (lambda (&rest _) (error "Test resize failure"))))
+      (should-error (agent-shell-markdown-rerender-images))
+      (should agent-shell-markdown--images-pending))
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+              ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+              ((symbol-function 'agent-shell-markdown--resize-image)
+               (lambda (start end _max-width width)
+                 (put-text-property start end 'agent-shell-markdown-image-window-width width))))
+      (agent-shell-markdown-rerender-images)
+      (should-not agent-shell-markdown--images-pending))))
 
 (ert-deftest agent-shell-markdown-rerender-images-resizes-stale-only ()
   ;; Re-size only images whose stored window width differs from the
