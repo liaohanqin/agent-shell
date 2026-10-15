@@ -2940,22 +2940,40 @@ original ACP-NOTIFICATION."
       (funcall adapter :acp-notification acp-notification)
     acp-notification))
 
+(defvar agent-shell--formatted-tool-call-inputs (make-hash-table :test #'equal)
+  "Memo mapping tool call raw inputs to their fenced renderings.
+
+Tool call updates re-render an unchanged `rawInput' on every event (see
+`agent-shell--format-tool-call-input'), and prettifying a large input's
+JSON costs hundreds of milliseconds, so remember what each input
+rendered to.  Bounded because inputs vary across calls; starting the
+table over is cheaper than tracking recency for a pure cache.")
+
 (defun agent-shell--format-tool-call-input (acp-raw-input)
   "Format ACP-RAW-INPUT from a tool call as a fenced code block.
 
 ACP-RAW-INPUT is the alist parsed from an ACP tool call's `rawInput' field.
 If it has exactly one key whose value is a non-empty string, that value
 is rendered inside a bare fence.  Otherwise ACP-RAW-INPUT is rendered as
-pretty-printed JSON inside a json fence."
-  (if-let* (((= (length acp-raw-input) 1))
-            (value (cdar acp-raw-input))
-            ((and (stringp value) (not (string-empty-p value)))))
-      (format "```\n%s\n```" value)
-    (format "```json\n%s\n```"
-            (agent-shell-with-work-buffer
-              (insert (json-encode acp-raw-input))
-              (json-pretty-print-buffer)
-              (buffer-string)))))
+pretty-printed JSON inside a json fence.
+
+The rendering is memoized (see `agent-shell--formatted-tool-call-inputs'):
+callers re-render on every tool call update, and a large input would be
+re-prettified hundreds of milliseconds per event otherwise."
+  (when (> (hash-table-count agent-shell--formatted-tool-call-inputs) 200)
+    (setq agent-shell--formatted-tool-call-inputs (make-hash-table :test #'equal)))
+  (or (gethash acp-raw-input agent-shell--formatted-tool-call-inputs)
+      (puthash acp-raw-input
+               (if-let* (((= (length acp-raw-input) 1))
+                         (value (cdar acp-raw-input))
+                         ((and (stringp value) (not (string-empty-p value)))))
+                   (format "```\n%s\n```" value)
+                 (format "```json\n%s\n```"
+                         (agent-shell-with-work-buffer
+                           (insert (json-encode acp-raw-input))
+                           (json-pretty-print-buffer)
+                           (buffer-string))))
+               agent-shell--formatted-tool-call-inputs)))
 
 (defconst agent-shell--activity-group-label "Activity"
   "Neutral placeholder heading for an activity group before it is refreshed.
