@@ -1142,22 +1142,49 @@ flips between hidden and `Me' immediately across all shells."
   "Relabel BUFFER, clearing its pending relabel timer."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq agent-shell-chat--relabel-timer nil)
+      (setq agent-shell-chat--relabel-timer nil
+            ;; A completed relabel ends its burst, so the next event
+            ;; starts a fresh delay window (see
+            ;; `agent-shell-chat--schedule-relabel').
+            agent-shell-chat--relabel-burst-start nil)
       (agent-shell-chat--relabel))))
 
+(defvar agent-shell-chat--relabel-delay 0.3
+  "Seconds of quiet before a scheduled relabel runs.
+See `agent-shell-chat--schedule-relabel'.")
+
+(defvar agent-shell-chat--relabel-max-delay 2.0
+  "Longest a relabel may be deferred by further events.
+See `agent-shell-chat--schedule-relabel'.")
+
+(defvar-local agent-shell-chat--relabel-burst-start nil
+  "Time the current relabel burst started.
+For `agent-shell-chat--schedule-relabel'.")
+
 (defun agent-shell-chat--schedule-relabel (&rest _)
-  "Schedule a coalesced, deferred relabel of the current buffer.
+  "Schedule a debounced, rate-capped relabel of the current buffer.
 
 Deferred so the triggering change's own text properties (e.g. the prompt
-face shell-maker applies after inserting) are in place; coalesced so a
-burst yields a single relabel.  Runs from the event subscription (which
-covers submissions, streaming, turn completion and `session-restored'),
-`shell-maker-finish-output-hook' (`clear') and
-`agent-shell-section-functions' (fragments rendered with no event)."
-  (when (and agent-shell-chat--labeled
-             (not agent-shell-chat--relabel-timer))
-    (setq agent-shell-chat--relabel-timer
-          (run-at-time 0 nil #'agent-shell-chat--relabel-buffer (current-buffer)))))
+face shell-maker applies after inserting) are in place.  Debounced on its
+trailing edge -- a burst coalesces into a single relabel once it quiets,
+rather than one full-buffer scan between each pair of events -- but
+capped at `agent-shell-chat--relabel-max-delay', so a stream that never
+pauses is still relabeled periodically rather than not at all.  Runs from
+the event subscription (which covers submissions, streaming, turn
+completion and `session-restored'), `shell-maker-finish-output-hook'
+(`clear') and `agent-shell-section-functions' (fragments rendered with
+no event)."
+  (when agent-shell-chat--labeled
+    (let* ((now (float-time))
+           (burst-start (or agent-shell-chat--relabel-burst-start
+                            (setq agent-shell-chat--relabel-burst-start now)))
+           (due (min (+ now agent-shell-chat--relabel-delay)
+                     (+ burst-start agent-shell-chat--relabel-max-delay))))
+      (when (timerp agent-shell-chat--relabel-timer)
+        (cancel-timer agent-shell-chat--relabel-timer))
+      (setq agent-shell-chat--relabel-timer
+            (run-at-time (max 0 (- due now)) nil
+                         #'agent-shell-chat--relabel-buffer (current-buffer))))))
 
 (defun agent-shell-chat--decorate-prompt-region (beg end)
   "Hide the shell prompt between BEG and END behind the `Me' label.
