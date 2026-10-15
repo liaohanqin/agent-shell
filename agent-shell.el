@@ -5827,11 +5827,9 @@ with GROUP-EXPANDED as the group's initial fold state."
                                               :complete t))))
           (when auto-scroll
             (goto-char (point-max)))
-          ;; The render above can leave tables mid-stream (rows measured
-          ;; against different widths), and async renderers (e.g. math
-          ;; images) can change how content measures after it.  Schedule
-          ;; the same re-layout the window hooks use, so settled output
-          ;; re-aligns its tables once the stream pauses.
+          ;; New tables or images may need settling after rendering.
+          ;; Reuse the window hooks' deferred check; user idle time does
+          ;; not imply the output stream has paused.
           (when-let* ((window (get-buffer-window (current-buffer) t)))
             (agent-shell--realign-on-change window))))))
   (with-current-buffer (map-elt state :buffer)
@@ -5943,11 +5941,9 @@ with GROUP-EXPANDED as the group's initial fold state."
     ;; otherwise swallow the reset.
     (when above-last-prompt
       (agent-shell--reset-undo-history))
-    ;; The render above can leave tables mid-stream (rows measured
-    ;; against different widths), and async renderers (e.g. math
-    ;; images) can change how content measures after it.  Schedule the
-    ;; same re-layout the window hooks use, so settled output re-aligns
-    ;; its tables once the stream pauses.
+    ;; New tables or images may need settling after rendering.
+    ;; Reuse the window hooks' deferred check; user idle time does
+    ;; not imply the output stream has paused.
     (when-let* ((window (get-buffer-window (current-buffer) t)))
       (agent-shell--realign-on-change window))))
 
@@ -12348,8 +12344,9 @@ Installs buffer-local window-change handlers (see
 for this buffer's windows and are removed automatically when the
 buffer is killed.  Added to `agent-shell-mode-hook' and
 `agent-shell-viewport-view-mode-hook' so both the shell and its
-viewport realign; a same-size window switch also fires the
-buffer-change hook, so first display is covered too."
+viewport realign.  The buffer-change hook invalidates the settled
+width, so even a same-size window switch checks content rendered
+off-screen."
   (add-hook 'window-size-change-functions
             #'agent-shell--realign-on-change nil t)
   (add-hook 'window-buffer-change-functions

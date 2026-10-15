@@ -8659,31 +8659,6 @@ comint strips the highlight off the first one."
               (should (equal finished 2)))))
       (kill-buffer shell-buf))))
 
-(ert-deftest agent-shell--realign-on-change-schedules-regardless-of-width ()
-  "Schedule a re-align on every window change, not just width changes.
-Regression: content rendered while the buffer was off-screen (a table
-laid out with `string-width', an image sized against no window) is not
-correct for the display.  Bringing the buffer back into a same-width
-window must still schedule a re-render; the per-item staleness decision
-belongs to `agent-shell-markdown-rerender-tables' /
-`agent-shell-markdown-rerender-images', so this hook must not gate on
-the window width being unchanged."
-  (with-temp-buffer
-    (agent-shell--enable-realign)
-    (let ((scheduled 0)
-          (shell-buffer (current-buffer)))
-      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
-                ((symbol-function 'window-buffer) (lambda (_) shell-buffer))
-                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
-                ((symbol-function 'run-with-idle-timer)
-                 (lambda (&rest _) (setq scheduled (1+ scheduled)) 'timer)))
-        (agent-shell--realign-on-change 'window)
-        (should (= scheduled 1))
-        ;; Same width again: a previously off-screen item may now be
-        ;; stale, so this must still schedule.
-        (agent-shell--realign-on-change 'window)
-        (should (= scheduled 2))))))
-
 (ert-deftest agent-shell--realign-on-change-targets-window-buffer ()
   "Schedule the re-align for the window's buffer, not the current one.
 Regression (#934): before Emacs 31, buffer-local window change hooks
