@@ -7970,27 +7970,257 @@ comint strips the highlight off the first one."
               (should (equal finished 2)))))
       (kill-buffer shell-buf))))
 
-(ert-deftest agent-shell--realign-on-change-schedules-regardless-of-width ()
-  "Schedule a re-align on every window change, not just width changes.
-Regression: content rendered while the buffer was off-screen (a table
-laid out with `string-width', an image sized against no window) is not
-correct for the display.  Bringing the buffer back into a same-width
-window must still schedule a re-render; the per-item staleness decision
-belongs to `agent-shell-markdown-rerender-tables' /
-`agent-shell-markdown-rerender-images', so this hook must not gate on
-the window width being unchanged."
+(ert-deftest agent-shell--realign-on-display-schedules-at-same-width ()
+  "Recheck content rendered off-screen even in a same-width window."
   (with-temp-buffer
-    (let ((scheduled 0))
+    (agent-shell--enable-realign)
+    (let ((scheduled 0)
+          (images 0))
       (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
                 ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables) #'ignore)
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda () (setq images (1+ images))))
                 ((symbol-function 'run-with-idle-timer)
-                 (lambda (&rest _) (setq scheduled (1+ scheduled)) 'timer)))
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (run-hook-with-args 'window-buffer-change-functions 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        ;; Content may have been rendered off-screen since the last display.
+        (run-hook-with-args 'window-buffer-change-functions 'window)
+        (should (= scheduled 2))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell--realign-skips-unchanged-output ()
+  "Ordinary output at the settled width schedules no historical scans."
+  (with-temp-buffer
+    (let ((scheduled 0)
+          (tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda () (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda () (setq images (1+ images))))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (insert "ordinary streamed output")
         (agent-shell--realign-on-change 'window)
         (should (= scheduled 1))
-        ;; Same width again: a previously off-screen item may now be
-        ;; stale, so this must still schedule.
+        ;; A redundant worker must also leave the settled buffer alone.
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        (should (= images 1))))))
+
+(defun agent-shell-tests--realign-new-images (bare-path &optional second-image)
+  "Check resize-return for BARE-PATH images, optionally adding SECOND-IMAGE."
+  (with-temp-buffer
+    (let ((width 800)
+          (scheduled 0)
+          (first-image nil))
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) width))
+                ((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                ((symbol-function 'image-supported-file-p) (lambda (_) t))
+                ((symbol-function 'agent-shell-markdown--resolve-image-url)
+                 (lambda (&rest _) "/tmp/agent-shell-image-test.svg"))
+                ((symbol-function 'create-image)
+                 (lambda (file &optional _type _data &rest props)
+                   (append (list 'image :type 'svg :file file) props)))
+                ((symbol-function 'image-flush) #'ignore)
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (setq width 400)
+        (agent-shell--realign-on-change 'window)
+        (setq first-image (copy-marker (point)))
+        (if bare-path
+            (progn
+              (insert "/tmp/agent-shell-image-test.svg\n")
+              (agent-shell-markdown--replace-image-file-paths))
+          (insert "![first](image.svg){width=50%}\n")
+          (agent-shell-markdown--replace-images :complete t))
+        (should (= 400 (get-text-property first-image
+                                          'agent-shell-markdown-image-window-width)))
+        (setq width 800)
+        ;; A later image at the settled width must not mask the first one's
+        ;; pending resize by overwriting a single last-rendered-width value.
+        (when second-image
+          (goto-char (point-max))
+          (let ((start (point)))
+            (insert "![second](image.svg){width=50%}\n")
+            (save-restriction
+              (narrow-to-region start (point-max))
+              (agent-shell-markdown--replace-images :complete t))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= 800 (get-text-property first-image
+                                          'agent-shell-markdown-image-window-width)))
+        (should-not agent-shell-markdown--images-pending)
+        ;; The scheduler, not just the worker, must notice new images.
+        (should (= scheduled 3))
+        (agent-shell--realign-on-change 'window)
+        (should (= scheduled 3))))))
+
+(ert-deftest agent-shell--realign-new-image-after-resize-return ()
+  "An image rendered during a transient resize settles after returning."
+  (agent-shell-tests--realign-new-images nil))
+
+(ert-deftest agent-shell--realign-new-bare-image-after-resize-return ()
+  "Bare-path images participate in the same pending re-layout protocol."
+  (agent-shell-tests--realign-new-images t))
+
+(ert-deftest agent-shell--realign-mixed-image-widths-remain-pending ()
+  "A second image at the original width must not hide an earlier stale one."
+  (agent-shell-tests--realign-new-images nil t))
+
+(ert-deftest agent-shell--realign-dirty-tables-at-same-width ()
+  "Newly rendered tables still settle without rescanning unrelated images."
+  (with-temp-buffer
+    (let ((scheduled 0)
+          (tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda ()
+                   (setq tables (1+ tables)
+                         agent-shell-markdown--tables-rendered nil)))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda () (setq images (1+ images))))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (setq agent-shell-markdown--tables-rendered (list (copy-marker (point))))
+        (agent-shell--realign-on-change 'window)
+        (should (= scheduled 2))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))
+        (should (= images 1))
         (agent-shell--realign-on-change 'window)
         (should (= scheduled 2))))))
+
+(ert-deftest agent-shell--realign-resize-rechecks-tables-and-images ()
+  "A changed window width still rechecks both kinds of rendered content."
+  (with-temp-buffer
+    (let ((width 800)
+          (scheduled 0)
+          (tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) width))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda () (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda () (setq images (1+ images))))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (setq width 900)
+        (agent-shell--realign-on-change 'window)
+        (should (= scheduled 2))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell--realign-undisplayed-worker-does-not-settle ()
+  "A buffer hidden before its timer fires must still settle on display."
+  (with-temp-buffer
+    (let ((displayed nil)
+          (tables 0))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) (and displayed 'window)))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda () (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images) #'ignore))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 0))
+        (setq displayed t)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))))))
+
+(ert-deftest agent-shell--realign-viewport-replacement-invalidates-settled-width ()
+  "A same-window page replacement rechecks copied table and image layouts."
+  (with-temp-buffer
+    (setq major-mode 'agent-shell-viewport-view-mode)
+    (let ((scheduled 0)
+          (tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-viewport--position) #'ignore)
+                ((symbol-function 'agent-shell-viewport--shell-buffer) #'ignore)
+                ((symbol-function 'agent-shell-viewport--update-header) #'ignore)
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda () (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda () (setq images (1+ images))))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create))))
+        (agent-shell--realign-rendered (current-buffer))
+        ;; These properties came from a different shell window, not a fresh
+        ;; viewport render, so there is no local dirty-table marker.
+        (agent-shell-viewport--initialize
+         :response (concat (propertize "table" 'agent-shell-markdown-table-source "| A |"
+                                       'agent-shell-markdown-table-width 400)
+                           (propertize "image" 'agent-shell-markdown-image-width-ratio 0.5
+                                       'agent-shell-markdown-image-window-width 400)))
+        (should (= scheduled 1))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell--realign-viewport-replacement-at-same-width ()
+  "Replacing settled viewport content rechecks copied table and image widths."
+  (with-temp-buffer
+    (setq major-mode 'agent-shell-viewport-view-mode)
+    (let ((scheduled 0))
+      (cl-letf (((symbol-function 'agent-shell-viewport--position) #'ignore)
+                ((symbol-function 'agent-shell-viewport--shell-buffer) #'ignore)
+                ((symbol-function 'agent-shell-viewport--update-header) #'ignore)
+                ((symbol-function 'window-live-p) (lambda (_) t))
+                ((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'run-with-idle-timer)
+                 (lambda (&rest _) (setq scheduled (1+ scheduled)) (timer-create)))
+                ;; Keep the real staleness scans, but avoid GUI rendering.
+                ((symbol-function 'agent-shell-markdown--render-table)
+                 (lambda (table)
+                   (put-text-property (map-elt table :start) (map-elt table :end)
+                                      'agent-shell-markdown-table-width 800)))
+                ((symbol-function 'agent-shell-markdown--resize-image)
+                 (lambda (start end _max-width width)
+                   (put-text-property start end
+                                      'agent-shell-markdown-image-window-width width))))
+        (agent-shell--realign-on-change 'window)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= scheduled 1))
+        ;; Pages copied from a narrower shell, then from an off-screen one.
+        (dolist (source-width '(400 nil))
+          (agent-shell-viewport--initialize
+           :response
+           (concat (propertize "T" 'agent-shell-markdown-table-source "table"
+                               'agent-shell-markdown-table-width source-width)
+                   (propertize "I" 'agent-shell-markdown-image-width-ratio 0.5
+                               'agent-shell-markdown-image-window-width source-width)))
+          (should-not agent-shell-markdown--tables-rendered)
+          (agent-shell--realign-rendered (current-buffer))
+          (should (eql 800 (get-text-property 1 'agent-shell-markdown-table-width)))
+          (should (eql 800 (get-text-property 2 'agent-shell-markdown-image-window-width))))
+        (should (= scheduled 3))))))
 
 (ert-deftest agent-shell--make-permission-actions-orders-allow-before-reject ()
   "Offer allowing before rejecting, whatever order the agent sent.

@@ -5704,11 +5704,9 @@ with GROUP-EXPANDED as the group's initial fold state."
                                               :complete t))))
           (when auto-scroll
             (goto-char (point-max)))
-          ;; The render above can leave tables mid-stream (rows measured
-          ;; against different widths), and async renderers (e.g. math
-          ;; images) can change how content measures after it.  Schedule
-          ;; the same re-layout the window hooks use, so settled output
-          ;; re-aligns its tables once the stream pauses.
+          ;; New tables or images may need settling after rendering.
+          ;; Reuse the window hooks' deferred check; user idle time does
+          ;; not imply the output stream has paused.
           (when-let* ((window (get-buffer-window (current-buffer) t)))
             (agent-shell--realign-on-change window))))))
   (with-current-buffer (map-elt state :buffer)
@@ -5820,11 +5818,9 @@ with GROUP-EXPANDED as the group's initial fold state."
     ;; otherwise swallow the reset.
     (when above-last-prompt
       (agent-shell--reset-undo-history))
-    ;; The render above can leave tables mid-stream (rows measured
-    ;; against different widths), and async renderers (e.g. math
-    ;; images) can change how content measures after it.  Schedule the
-    ;; same re-layout the window hooks use, so settled output re-aligns
-    ;; its tables once the stream pauses.
+    ;; New tables or images may need settling after rendering.
+    ;; Reuse the window hooks' deferred check; user idle time does
+    ;; not imply the output stream has paused.
     (when-let* ((window (get-buffer-window (current-buffer) t)))
       (agent-shell--realign-on-change window))))
 
@@ -12030,32 +12026,39 @@ For example:
 (defvar-local agent-shell--realign-timer nil
   "Pending idle timer that re-aligns this buffer's rendered markdown.")
 
+(defvar-local agent-shell--realign-width nil
+  "Window pixel width at the last completed re-align, or nil after display changes.")
+
 (defun agent-shell--realign-rendered (buffer)
   "Re-align BUFFER's window-relative markdown: tables and images.
 Deferred worker for `agent-shell--realign-on-change'."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq agent-shell--realign-timer nil)
-      (agent-shell-markdown-rerender-tables)
-      (agent-shell-markdown-rerender-images))))
+      (when-let* ((window (get-buffer-window buffer t))
+                  (width (window-body-width window t)))
+        (let ((resized (not (eql width agent-shell--realign-width))))
+          (when (or resized agent-shell-markdown--tables-rendered)
+            (agent-shell-markdown-rerender-tables))
+          (when (or resized agent-shell-markdown--images-pending)
+            (agent-shell-markdown-rerender-images))
+          (setq agent-shell--realign-width width))))))
 
 (defun agent-shell--realign-on-change (window)
-  "Re-align the current buffer's window-relative markdown shown in WINDOW.
+  "Schedule re-alignment for changed markdown or width in WINDOW.
 
-Installed buffer-locally on `window-size-change-functions' and
-`window-buffer-change-functions' (whose buffer-local values are
-called with the window, the buffer current), so it runs only for
-shell windows.  Table column widths and percentage image sizes are
-measured against the display, so a resize or first display can change
-them; schedule a re-render on any such change.  What actually needs
-re-doing is decided per-item by `agent-shell-markdown-rerender-tables'
-and `agent-shell-markdown-rerender-images' (via their stored widths),
-so this can fire freely: it also catches content rendered while the
-buffer was off-screen and then brought back into a same-width window.
-Deferred to an idle timer, which also debounces a drag-resize into a
-single re-render, because modifying a buffer from within these
-redisplay hooks is unsafe."
-  (when (window-live-p window)
+Ordinary output at the settled width needs no full-buffer scan.
+New tables and images still need checking, even at the settled width.
+The buffer-change hook and viewport replacement invalidate
+`agent-shell--realign-width' for content rendered elsewhere.
+Deferred because modifying a buffer within redisplay hooks is unsafe.
+The idle threshold measures user inactivity, not time since the last
+stream chunk: an already idle Emacs can run this during streaming."
+  (when (and (window-live-p window)
+             (or (not (eql (window-body-width window t)
+                           agent-shell--realign-width))
+                 agent-shell-markdown--tables-rendered
+                 agent-shell-markdown--images-pending))
     (when (timerp agent-shell--realign-timer)
       (cancel-timer agent-shell--realign-timer))
     (setq agent-shell--realign-timer
@@ -12070,12 +12073,16 @@ Installs buffer-local window-change handlers (see
 for this buffer's windows and are removed automatically when the
 buffer is killed.  Added to `agent-shell-mode-hook' and
 `agent-shell-viewport-view-mode-hook' so both the shell and its
-viewport realign; a same-size window switch also fires the
-buffer-change hook, so first display is covered too."
+viewport realign.  The buffer-change hook invalidates the settled
+width, so even a same-size window switch checks content rendered
+off-screen."
   (add-hook 'window-size-change-functions
             #'agent-shell--realign-on-change nil t)
   (add-hook 'window-buffer-change-functions
-            #'agent-shell--realign-on-change nil t))
+            (lambda (window)
+              (setq agent-shell--realign-width nil)
+              (agent-shell--realign-on-change window))
+            nil t))
 
 (add-hook 'agent-shell-mode-hook #'agent-shell--enable-realign)
 (add-hook 'agent-shell-viewport-view-mode-hook

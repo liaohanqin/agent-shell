@@ -1460,6 +1460,11 @@ has fully streamed in after it, returns nil."
         (goto-char pos)
         (looking-at-p "{[^}\n]*\\'"))))
 
+(defvar-local agent-shell-markdown--images-pending nil
+  "Non-nil when new window-relative images await a re-layout check.
+Kept until `agent-shell-markdown-rerender-images' finishes in a displayed
+buffer, so later renders at another width cannot hide earlier stale images.")
+
 (cl-defun agent-shell-markdown--replace-images (&key avoid-ranges image-cache-directory complete)
   "Replace `![alt](url)' image markup with displayed images.
 
@@ -1611,7 +1616,8 @@ For example, the buffer \"see ![logo](logo.png)\" becomes
                                        width-ratio)
                     (put-text-property
                      markup-start end 'agent-shell-markdown-image-window-width
-                     (agent-shell-markdown--displayed-window-width))))))
+                     (agent-shell-markdown--displayed-window-width))
+                    (setq agent-shell-markdown--images-pending t)))))
              ;; Remote image we couldn't show inline (no cache configured, the
              ;; download failed, or a non-graphical display): render a link
              ;; that opens the url, rather than leaving raw `![alt](url)' text.
@@ -1702,6 +1708,7 @@ renders the image in place of that text."
                 (put-text-property
                  path-start path-end 'agent-shell-markdown-image-window-width
                  (agent-shell-markdown--displayed-window-width))
+                (setq agent-shell-markdown--images-pending t)
                 (add-text-properties path-start path-end
                                      '(agent-shell-markdown-frozen t
                                                                    rear-nonsticky (agent-shell-markdown-frozen))))))))))))
@@ -3993,7 +4000,8 @@ the current width, so it is safe to call on display and on resize."
                      (round (* ratio width))
                    (agent-shell-markdown--image-max-width))
                  width))))))
-      (restore-buffer-modified-p modified))))
+      (restore-buffer-modified-p modified)
+      (setq agent-shell-markdown--images-pending nil))))
 
 (defun agent-shell-markdown-image-scale-increase ()
   "Widen the image at point, or every image in the buffer, by one step.

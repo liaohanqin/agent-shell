@@ -347,6 +347,7 @@ O(accumulated-body).  Label-only updates leave the body untouched."
                 (agent-shell-ui--insert-read-only (agent-shell-ui--required-newlines 2))
                 (setq block-start (point))
                 (agent-shell-ui--insert-fragment model qualified-id effective-expanded navigation)
+                (setq block-end (copy-marker (point) t))
                 ;; The group's trailing separator (the header's `\n\n', inserted
                 ;; once) now sits right after this last child; fold it into
                 ;; this child's padding so it is not stranded outside every
@@ -362,24 +363,17 @@ O(accumulated-body).  Label-only updates leave the body untouched."
                 (agent-shell-ui--insert-fragment model qualified-id effective-expanded navigation)
                 (agent-shell-ui--insert-read-only "\n\n")
                 (setq padding-end (point)))))
-            ;; A collapsed group's children must stay hidden across updates.
-            ;; A child's own edit path (insert, or replace-label/body on an
-            ;; update) restores visibility from the child's own state, which
-            ;; would reveal it under a folded header; re-apply the group
-            ;; collapse so updates don't leak children onto the header line.
-            ;;
-            ;; Skipped when the update only appended to an already hidden
-            ;; body, which hides its own chars.  Re-applying then costs a
-            ;; pass over the whole child region, and that region holds the
-            ;; streamed body, so a folded group paid O(chunks so far) on
-            ;; every chunk (issue #757).
-            (when-let* (((not wrote-hidden))
+            ;; Only this edit can expose content in an already folded group.
+            ;; Hide its leading separator too, but not the trailing separator
+            ;; outside the group.  Hidden-only appends already hide their own
+            ;; chars (issue #757).
+            (when-let* (((and (not wrote-hidden) padding-start block-end))
                         (group-qid (map-elt model :group-qualified-id))
                         (header (agent-shell-ui--group-header-range group-qid))
                         (header-state (get-text-property (map-elt header :start)
                                                          'agent-shell-ui-state))
                         ((map-elt header-state :collapsed)))
-              (agent-shell-ui--set-group-collapsed group-qid t))
+              (put-text-property padding-start (marker-position block-end) 'invisible t))
             (when on-post-process
               (funcall on-post-process))
             (when-let* ((block-range (if block-end

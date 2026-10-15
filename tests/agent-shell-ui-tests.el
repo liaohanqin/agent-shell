@@ -904,6 +904,79 @@ separators stayed hidden, collapsing children onto the folded header line."
       ;; leading char), so child content can't leak onto the header line.
       (should (get-text-property (1+ (map-elt c :start)) 'invisible)))))
 
+(ert-deftest agent-shell-ui-group-collapsed-updates-avoid-whole-group-scan-test ()
+  "Child edits hide only their own range, without scanning or redrawing the group."
+  (with-temp-buffer
+    (agent-shell-ui-mode 1)
+    (dolist (id '("m1" "m2"))
+      (agent-shell-ui-update-fragment
+       (agent-shell-ui-make-fragment-model
+        :namespace-id "ns" :block-id id :group-id "grp" :group-label "Tools"
+        :group-expanded nil :label-left "run" :label-right id)
+       :navigation 'always))
+    (let ((scans 0)
+          (indicators 0)
+          (children-end (symbol-function 'agent-shell-ui--group-children-end))
+          (set-indicator (symbol-function 'agent-shell-ui--set-indicator-collapsed)))
+      (cl-letf (((symbol-function 'agent-shell-ui--group-children-end)
+                 (lambda (&rest args)
+                   (setq scans (1+ scans))
+                   (apply children-end args)))
+                ((symbol-function 'agent-shell-ui--set-indicator-collapsed)
+                 (lambda (&rest args)
+                   (setq indicators (1+ indicators))
+                   (apply set-indicator args))))
+        ;; First body, replacement, label-only edit, then labeled append.
+        (dolist (update '((:label-left "completed" :body "first body\n")
+                          (:body "replacement\n")
+                          (:label-right "a much longer label")
+                          (:label-left "run" :body "last chunk\n")))
+          (apply #'agent-shell-ui-update-fragment
+                 (apply #'agent-shell-ui-make-fragment-model
+                        :namespace-id "ns" :block-id "m1" update)
+                 (when (equal (plist-get update :label-left) "run") '(:append t)))))
+      (should (= scans 0))
+      (should (= indicators 0)))
+    (let ((region (agent-shell-ui--group-child-region :group-qualified-id "ns-grp")))
+      (should-not (text-property-not-all (map-elt region :start) (map-elt region :end)
+                                          'invisible t)))
+    ;; Folding the parent must not overwrite the children's own fold state.
+    (let ((inhibit-read-only t))
+      (agent-shell-ui--set-group-collapsed "ns-grp" nil))
+    (dolist (child (agent-shell-ui--group-children :group-qualified-id "ns-grp"))
+      (should-not (get-text-property (map-elt child :start) 'invisible)))))
+
+(ert-deftest agent-shell-ui-group-collapsed-new-child-preserves-following-separator-test ()
+  "Adding a folded child must not hide the separator before an existing next block."
+  (with-temp-buffer
+    (agent-shell-ui-mode 1)
+    (agent-shell-ui-update-fragment
+     (agent-shell-ui-make-fragment-model
+      :namespace-id "ns" :block-id "m1" :group-id "grp" :group-label "Tools"
+      :group-expanded t :label-left "first")
+     :navigation 'always)
+    (agent-shell-ui-update-fragment
+     (agent-shell-ui-make-fragment-model
+      :namespace-id "ns" :block-id "after" :label-left "After")
+     :navigation 'always)
+    (let ((inhibit-read-only t))
+      (agent-shell-ui--set-group-collapsed "ns-grp" t))
+    (agent-shell-ui-update-fragment
+     (agent-shell-ui-make-fragment-model
+      :namespace-id "ns" :block-id "m2" :group-id "grp" :group-label "Tools"
+      :label-left "second")
+     :navigation 'always)
+    (dolist (expand '(nil t))
+      (when expand
+        (let ((inhibit-read-only t))
+          (agent-shell-ui--set-group-collapsed "ns-grp" nil)))
+      (let* ((region (agent-shell-ui--group-child-region :group-qualified-id "ns-grp"))
+             (end (map-elt region :end))
+             (after (marker-position
+                     (map-elt (agent-shell-ui--cached-block "ns-after") :start))))
+        (should (equal (buffer-substring-no-properties end after) "\n\n"))
+        (should-not (text-property-any end after 'invisible t))))))
+
 (ert-deftest agent-shell-ui-group-children-end-matches-enumeration-test ()
   "`--group-children-end' matches enumeration, and stops at a non-child.
 It replaces `--group-children' where only the last child's end is

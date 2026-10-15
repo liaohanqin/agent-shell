@@ -96,6 +96,7 @@
 (defvar agent-shell-preferred-agent-config)
 (defvar agent-shell-session-strategy)
 (defvar agent-shell--state)
+(defvar agent-shell--realign-width)
 
 (defvar-local agent-shell-viewport--compose-snapshot nil
   "Alist with :content and :location from compose buffer before viewing history.")
@@ -390,6 +391,7 @@ Optionally set its PROMPT and RESPONSE."
   (let ((inhibit-read-only t)
         (viewport-buffer (current-buffer)))
     (erase-buffer)
+    (setq-local agent-shell--realign-width nil)
     (when-let* ((shell-buffer (agent-shell-viewport--shell-buffer)))
       (with-current-buffer shell-buffer
         (unless (eq agent-shell-header-style 'graphical)
