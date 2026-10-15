@@ -3733,6 +3733,33 @@ every other character is CHAR-PX wide."
         (agent-shell-markdown-rerender-tables)
         (should (= calls 0))))))
 
+(defun agent-shell-markdown-tests--table-start-markers ()
+  "Return a marker at each rendered table's start, in buffer order."
+  (let ((markers nil))
+    (save-excursion
+      (goto-char (point-min))
+      (let (match)
+        (while (setq match (text-property-search-forward
+                            'agent-shell-markdown-table-source))
+          (push (copy-marker (prop-match-beginning match)) markers))))
+    (nreverse markers)))
+
+(defun agent-shell-markdown-tests--two-mismatched-tables (dirty-table)
+  "Set up two tables whose stored width is stale, marking DIRTY-TABLE.
+DIRTY-TABLE is 0 or 1.  Returns the list of table start positions and
+leaves `agent-shell-markdown--tables-rendered' holding DIRTY-TABLE's
+marker."
+  (insert "| A | B |\n|---|---|\n| 1 | 2 |\n\n| C | D |\n|---|---|\n| 3 | 4 |\n")
+  (agent-shell-markdown-replace-markup)
+  (let ((markers (agent-shell-markdown-tests--table-start-markers)))
+    (should (= 2 (length markers)))
+    ;; Window is 500 wide; a stored 400 can only come from another width,
+    ;; so the width check alone flags both tables as stale.
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-table-width 400)
+    (setq agent-shell-markdown--tables-rendered (list (nth dirty-table markers)))
+    (mapcar #'marker-position markers)))
+
 (ert-deftest agent-shell-markdown-carry-properties-drops-font-lock-face ()
   ;; `font-lock-face' is our own styling (mirrored from `face'), not a
   ;; caller property, so it must not ride along on the delete+insert.
