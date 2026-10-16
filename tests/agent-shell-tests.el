@@ -8481,6 +8481,28 @@ The render shifts the input area, which leaves the entry
         (agent-shell--render-flush)
         (should (= resets 0))))))
 
+(ert-deftest agent-shell--render-throttled-flush-keeps-point-outside-region ()
+  "A deferred render must not drag point that sits outside its region.
+The trailing timer runs with no caller around to restore point, so
+narrowing to the recorded body would otherwise clamp point (e.g. the
+prompt below) onto that body's edge."
+  (with-temp-buffer
+    (insert "body\n\nprompt")
+    (let ((agent-shell--render-throttle-interval 30)
+          (agent-shell--render-throttle-last (float-time)))
+      (cl-letf (((symbol-function 'agent-shell--render-markdown)
+                 (lambda (&rest _)
+                   (goto-char (point-min))
+                   (insert "styled"))))
+        (save-restriction
+          (narrow-to-region 1 5)
+          (agent-shell--render-markdown-throttled))
+        (should agent-shell--render-throttle-requests)
+        ;; The user sits at the prompt below the streamed body.
+        (goto-char (point-max))
+        (agent-shell--render-flush)
+        (should (= (point) (point-max)))))))
+
 (ert-deftest agent-shell--render-throttled-trailing-keeps-earliest-deadline ()
   "A newer request must not push back an armed flush.
 Re-arming per request would starve a region that stops updating, and

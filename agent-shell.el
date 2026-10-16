@@ -438,11 +438,17 @@ user's edit."
               (end (marker-position (map-elt request :end)))
               ((< begin end)))
     (let ((tick (buffer-chars-modified-tick)))
-      (save-restriction
-        (narrow-to-region begin end)
-        (let ((inhibit-read-only t)
-              (buffer-undo-list t))
-          (save-excursion
+      ;; Point wraps the narrowing: `narrow-to-region' clamps a point
+      ;; that sits outside the region and `save-restriction' does not
+      ;; restore it.  The trailing timer calls this with no caller
+      ;; around to restore point (typically sitting at the prompt
+      ;; below), so narrowing first would drag the cursor onto the
+      ;; rendered body's edge.
+      (save-excursion
+        (save-restriction
+          (narrow-to-region begin end)
+          (let ((inhibit-read-only t)
+                (buffer-undo-list t))
             (apply #'agent-shell--render-markdown (map-elt request :args)))))
       (when (/= tick (buffer-chars-modified-tick))
         (agent-shell--reset-undo-history))
