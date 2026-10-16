@@ -31,6 +31,7 @@
 (require 'acp)
 
 (declare-function agent-shell--indent-string "agent-shell")
+(declare-function agent-shell--interpolate-gradient "agent-shell")
 (declare-function agent-shell-welcome-message "agent-shell")
 (declare-function agent-shell-make-agent-config "agent-shell")
 (autoload 'agent-shell-make-agent-config "agent-shell")
@@ -192,20 +193,50 @@ here override any servers with the same name in the user-level
             "\n\n"
             message)))
 
+;; The cat is drawn with half-block glyphs (U+2580-259F).  CJK
+;; monospace fonts (e.g. Noto Sans Mono CJK SC) render those as
+;; full-width glyphs, which breaks the art, so pin a Latin monospace
+;; family whose block glyphs are half-width.
 (defun agent-shell-codebuddy--ascii-art ()
-  "CodeBuddy ASCII art."
+  "CodeBuddy ASCII art: pixel cat and teal-to-blue wordmark."
   (let* ((is-dark (eq (frame-parameter nil 'background-mode) 'dark))
+         (cat-color (if is-dark "#00BC90" "#00916e"))
+         (text-colors (if is-dark '("#00BC90" "#4db6ff")
+                        '("#00916e" "#005fa3")))
+         (text-column 25)
          (text (string-trim "
-   ______          __     ____            __    __
-  / ____/___  ____/ /__  / __ )__  ______/ /___/ /_  __
- / /   / __ \/ __  / _ \/ __  / / / / __  / __  / / / /
-/ /___/ /_/ / /_/ /  __/ /_/ / /_/ / /_/ / /_/ / /_/ /
-\____/\____/\__,_/\___/_____/\__,_/\__,_/\__,_/\__, /
-                                              /____/
-" "\n")))
-    (propertize text 'font-lock-face (if is-dark
-                                         '(:foreground "#4db6ff" :inherit fixed-pitch)
-                                       '(:foreground "#005fa3" :inherit fixed-pitch)))))
+                             ____          _
+                            / ___|___   __| | ___
+   ████          ████      | |   / _ \\ / _` |/ _ \\
+   ████▄▄▄▄▄▄▄▄▄▄████      | |__| (_) | (_| |  __/
+▄▄▄█                █▄▄▄    \\____\\___/ \\__,_|\\___|
+████                ████
+████    ██    ██    ████    ____            _     _
+████    ██    ██    ████   | __ ) _   _  __| | __| |_   _
+████                ████   |  _ \\| | | |/ _` |/ _` | | | |
+   ██████████████████      | |_) | |_| | (_| | (_| | |_| |
+                           |____/ \\__,_|\\__,_|\\__,_|\\__, |
+                                                    |___/
+" "\n"))
+         (lines (split-string text "\n"))
+         (last-row (max 1 (1- (length lines))))
+         (result ""))
+    (dotimes (row (length lines))
+      (let ((line (nth row lines))
+            (colored ""))
+        (dotimes (i (length line))
+          (setq colored
+                (concat colored
+                        (propertize (substring line i (1+ i))
+                                    'font-lock-face
+                                    `(:foreground
+                                      ,(if (< i text-column)
+                                           cat-color
+                                         (agent-shell--interpolate-gradient
+                                          text-colors (/ (float row) last-row)))
+                                      :family "DejaVu Sans Mono")))))
+        (setq result (concat result colored "\n"))))
+    (string-trim-right result)))
 
 (provide 'agent-shell-codebuddy)
 
