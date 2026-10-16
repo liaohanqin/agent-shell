@@ -76,5 +76,37 @@ active, so --strict-mcp-config must NOT be passed."
       (when (buffer-live-p test-buffer)
         (kill-buffer test-buffer)))))
 
+(ert-deftest agent-shell-codebuddy-ascii-art-test ()
+  "Test CodeBuddy ASCII art renders intact with brand colors.
+
+Backslash strokes like `\\_' and `\\/' in the literal must survive
+Lisp string evaluation, and the cat pixels must carry the CodeBuddy
+teal."
+  (let ((art (agent-shell-codebuddy--ascii-art)))
+    (should (equal (substring-no-properties art)
+                   "                             ____          _
+                            / ___|___   __| | ___
+   ████          ████      | |   / _ \\ / _` |/ _ \\
+   ████▄▄▄▄▄▄▄▄▄▄████      | |__| (_) | (_| |  __/
+▄▄▄█                █▄▄▄    \\____\\___/ \\__,_|\\___|
+████                ████
+████    ██    ██    ████    ____            _     _
+████    ██    ██    ████   | __ ) _   _  __| | __| |_   _
+████                ████   |  _ \\| | | |/ _` |/ _` | | | |
+   ██████████████████      | |_) | |_| | (_| | (_| | |_| |
+                           |____/ \\__,_|\\__,_|\\__,_|\\__, |
+                                                    |___/"))
+    (should (equal (plist-get (get-text-property (string-match "█" art)
+                                                 'font-lock-face art)
+                              :foreground)
+                   (if (eq (frame-parameter nil 'background-mode) 'dark)
+                       "#00BC90" "#00916e")))
+    ;; Half-block glyphs must not inherit a CJK fixed-pitch font
+    ;; (full-width blocks break the pixel grid).
+    (should (equal (plist-get (get-text-property (string-match "█" art)
+                                                 'font-lock-face art)
+                              :family)
+                   "DejaVu Sans Mono"))))
+
 (provide 'agent-shell-codebuddy-tests)
 ;;; agent-shell-codebuddy-tests.el ends here
