@@ -26,6 +26,7 @@
 ;;; Code:
 
 (require 'ert)
+(require 'cl-lib)
 (require 'agent-shell)
 (require 'agent-shell-codebuddy)
 
@@ -79,34 +80,58 @@ active, so --strict-mcp-config must NOT be passed."
 (ert-deftest agent-shell-codebuddy-ascii-art-test ()
   "Test CodeBuddy ASCII art renders intact with brand colors.
 
-Backslash strokes like `\\_' and `\\/' in the literal must survive
-Lisp string evaluation, and the cat pixels must carry the CodeBuddy
-teal."
-  (let ((art (agent-shell-codebuddy--ascii-art)))
+The wordmark uses solid ANSI Shadow glyphs (block and box-drawing
+characters, no slash strokes), and the cat pixels must carry the
+CodeBuddy teal."
+  (let* ((art (agent-shell-codebuddy--ascii-art))
+         ;; The cat's left ear: the cat rows are the only lines that
+         ;; start with an indented block-character run.  The wordmark
+         ;; (gradient-colored) is indented further, so anchor at the
+         ;; line start to land inside the cat-colored columns.
+         (cat-pixel (string-match "^   ████" art)))
     (should (equal (substring-no-properties art)
-                   "                             ____          _
-                            / ___|___   __| | ___
-   ████          ████      | |   / _ \\ / _` |/ _ \\
-   ████▄▄▄▄▄▄▄▄▄▄████      | |__| (_) | (_| |  __/
-▄▄▄█                █▄▄▄    \\____\\___/ \\__,_|\\___|
-████                ████
-████    ██    ██    ████    ____            _     _
-████    ██    ██    ████   | __ ) _   _  __| | __| |_   _
-████                ████   |  _ \\| | | |/ _` |/ _` | | | |
-   ██████████████████      | |_) | |_| | (_| | (_| | |_| |
-                           |____/ \\__,_|\\__,_|\\__,_|\\__, |
-                                                    |___/"))
-    (should (equal (plist-get (get-text-property (string-match "█" art)
+                   "                             ██████╗  ██████╗  ██████╗  ███████╗
+                            ██╔════╝ ██╔═══██╗ ██╔══██╗ ██╔════╝
+   ████          ████       ██║      ██║   ██║ ██║  ██║ █████╗
+   ████▄▄▄▄▄▄▄▄▄▄████       ██║      ██║   ██║ ██║  ██║ ██╔══╝
+▄▄▄█                █▄▄▄    ╚██████╗ ╚██████╔╝ ██████╔╝ ███████╗
+████                ████     ╚═════╝  ╚═════╝  ╚═════╝  ╚══════╝
+████    ██    ██    ████
+████    ██    ██    ████    ██████╗  ██╗   ██╗ ██████╗  ██████╗  ██╗   ██╗
+████                ████    ██╔══██╗ ██║   ██║ ██╔══██╗ ██╔══██╗ ╚██╗ ██╔╝
+   ██████████████████       ██████╔╝ ██║   ██║ ██║  ██║ ██║  ██║  ╚████╔╝
+                            ██╔══██╗ ██║   ██║ ██║  ██║ ██║  ██║   ╚██╔╝
+                            ██████╔╝ ╚██████╔╝ ██████╔╝ ██████╔╝    ██║
+                            ╚═════╝   ╚═════╝  ╚═════╝  ╚═════╝     ╚═╝"))
+    (should (equal (plist-get (get-text-property cat-pixel
                                                  'font-lock-face art)
                               :foreground)
                    (if (eq (frame-parameter nil 'background-mode) 'dark)
                        "#00BC90" "#00916e")))
     ;; Half-block glyphs must not inherit a CJK fixed-pitch font
     ;; (full-width blocks break the pixel grid).
-    (should (equal (plist-get (get-text-property (string-match "█" art)
+    (should (equal (plist-get (get-text-property cat-pixel
                                                  'font-lock-face art)
                               :family)
-                   "DejaVu Sans Mono"))))
+                   (agent-shell-codebuddy--welcome-font-family)))))
+
+(ert-deftest agent-shell-codebuddy-welcome-font-family-test ()
+  "Test the half-width-block font preference order.
+
+DejaVu Sans Mono ships with most GNU/Linux systems but not macOS,
+where Menlo is the built-in match."
+  (cl-letf (((symbol-function 'find-font) (lambda (_spec) 'font)))
+    (should (equal (agent-shell-codebuddy--welcome-font-family)
+                   "DejaVu Sans Mono")))
+  (cl-letf (((symbol-function 'find-font)
+             (lambda (spec)
+               (when (equal (format "%s" (font-get spec :family)) "Menlo")
+                 'font))))
+    (should (equal (agent-shell-codebuddy--welcome-font-family)
+                   "Menlo")))
+  (cl-letf (((symbol-function 'find-font) (lambda (_spec) nil)))
+    (should (equal (agent-shell-codebuddy--welcome-font-family)
+                   "monospace"))))
 
 (provide 'agent-shell-codebuddy-tests)
 ;;; agent-shell-codebuddy-tests.el ends here
