@@ -295,11 +295,16 @@ doing can be lost.  Whether that happens is the agent's choice, not ours.
 
 When the agent declines the steer, the running turn is interrupted rather
 than left to carry on in a direction you believe you already corrected.
+A CodeBuddy turn that is merely between steerable phases is the
+exception: the prompt is put back at the shell prompt, or queued when
+the shell keeps no live prompt, and the turn keeps running (see
+`agent-shell-experimental--send-steering').
 
 Steering a shell awaiting a permission answer asks for confirmation
 first: no implementation defines what an agent does with a prompt
 injected while a tool sits on that question, and a declined steer
-interrupts the turn, which rejects that permission along with it.
+usually interrupts the turn, which rejects that permission along with
+it (the CodeBuddy exception above leaves the turn running).
 
 While reading, @ completes project files and / completes available agent
 commands when the agent has reported them."
