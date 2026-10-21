@@ -56,6 +56,7 @@
 (declare-function agent-shell--emit-event "agent-shell")
 (declare-function agent-shell--expand-truncated-regions "agent-shell")
 (declare-function agent-shell--prompt-content-blocks "agent-shell")
+(declare-function agent-shell--prompt-queue-enqueue "agent-shell-prompt-queue")
 (declare-function agent-shell--insert-to-shell-buffer "agent-shell")
 (declare-function agent-shell--append-transcript "agent-shell")
 (declare-function agent-shell--indent-markdown-headers "agent-shell")
@@ -260,9 +261,10 @@ speaking the advertised `_session/steering' extension answer with
 running and the agent started none of its own -- the extension's
 \"promptRequired\" situation reached from the other direction -- so it
 maps there, and the prompt is submitted normally when this shell is
-free, or reported and interrupted when it is still busy.  Anything else
-is nil, which `agent-shell-experimental--send-steering' reads as a steer
-that did not land.
+free, or reported and kept (at the prompt, or queued when there is no
+live one) when it is still busy.  Anything else is nil, which
+`agent-shell-experimental--send-steering' reads as a steer that did not
+land.
 
 For example:
 
@@ -310,9 +312,15 @@ Agents differ on which they answer with, so an unrecognised outcome, and
 a request that fails outright, are treated as a steer that did not land:
 reported in the shell, and the running turn interrupted.
 
-Nothing here queues.  Queueing is `agent-shell-prompt-queue', and a steer
-turned into a queued prompt would reach the agent long after the user
-asked for it."
+A CodeBuddy \"promptRequired\" is the exception: its `idle' also covers run
+states that are merely not steerable (preparing, compacting, or between
+model and tool work), where the turn is still running.  When this shell
+is still busy, the prompt is put back for the user to resend and the
+turn is left running rather than interrupted.
+
+Nothing here queues a prompt the agent took.  A declined one is put back
+at the live prompt when the shell keeps one, and queued only when there
+is nowhere else to hold it."
   (let ((dialect (agent-shell--steering-dialect state))
         (content-blocks (agent-shell--prompt-content-blocks
                          (agent-shell--expand-truncated-regions prompt))))
@@ -369,7 +377,8 @@ asked for it."
            ;; CodeBuddy's `idle' normalises here.  A shell that has not
            ;; yet processed its own `session/prompt' response is still
            ;; busy, where submitting errors ("Busy, try later") without
-           ;; inserting, so that case falls through to declined.
+           ;; inserting.  Claude's busy case falls through to declined;
+           ;; CodeBuddy's keeps the prompt, see below.
            ((and "promptRequired" (guard (not (shell-maker-busy))))
             (agent-shell--insert-to-shell-buffer :text prompt :submit t :no-focus t))
            ;; Claude and Codex both answer with this one.  No `session/prompt'
@@ -401,24 +410,67 @@ asked for it."
            ;; act on, CodeBuddy's other refusals, and anything an agent we
            ;; do not know about answers with.
            (_
-            (agent-shell--update-fragment
-             :state (agent-shell--state)
-             :block-id (format "%s-steer-declined"
-                               (map-elt (agent-shell--state) :request-count))
-             :body (agent-shell--make-boxed-message
-                    :text (if outcome
-                              (format "Note: Steered prompt declined (%s)."
-                                      outcome)
-                            "Note: Steered prompt declined."))
-             :create-new t
-             :above-last-prompt (not (agent-shell--active-requests-p
-                                      (agent-shell--state))))
-            (map-put! (agent-shell--state) :last-entry-type "steering_declined")
-            ;; Interrupted so the agent does not carry on for hours in a
-            ;; direction the user believes they already corrected.  A declined
-            ;; steer does not say whether continuing is harmless, and the cost
-            ;; of guessing wrong is far higher one way than the other.
-            (agent-shell-interrupt t))))))))
+            (let* ((keep-prompt
+                    ;; CodeBuddy answers "idle" whenever its run state cannot
+                    ;; take a steer (preparing, compacting, between model and
+                    ;; tool work), not only when the turn ended.  The turn is
+                    ;; then still running, so interrupting would discard work
+                    ;; the user never asked to drop: put the prompt back and
+                    ;; let them decide instead.
+                    (and (eq dialect 'session-steer)
+                         (equal outcome "promptRequired")
+                         (shell-maker-busy)))
+                   ;; Kept before the note is written, so the note can say
+                   ;; where the prompt went: back at the prompt for the user
+                   ;; to resend, or queued until the turn ends when the shell
+                   ;; keeps no live prompt.
+                   (kept-as (and keep-prompt
+                                 (agent-shell-experimental--keep-declined-prompt
+                                  :state (agent-shell--state) :prompt prompt))))
+              (agent-shell--update-fragment
+               :state (agent-shell--state)
+               :block-id (format "%s-steer-declined"
+                                 (map-elt (agent-shell--state) :request-count))
+               :body (agent-shell--make-boxed-message
+                      :text (if outcome
+                                (format "Note: Steered prompt declined (%s).%s"
+                                        outcome
+                                        (pcase kept-as
+                                          ('kept " Prompt kept at the prompt.")
+                                          ('queued
+                                           " Prompt queued until the turn ends.")
+                                          (_ "")))
+                              "Note: Steered prompt declined."))
+               :create-new t
+               :above-last-prompt (or kept-as
+                                       (not (agent-shell--active-requests-p
+                                             (agent-shell--state)))))
+              (map-put! (agent-shell--state) :last-entry-type "steering_declined")
+              (unless keep-prompt
+                ;; Interrupted so the agent does not carry on for hours in a
+                ;; direction the user believes they already corrected.  A
+                ;; declined steer does not say whether continuing is
+                ;; harmless, and the cost of guessing wrong is far higher
+                ;; one way than the other.
+                (agent-shell-interrupt t))))))))))
+
+(cl-defun agent-shell-experimental--keep-declined-prompt (&key state prompt)
+  "Keep PROMPT after the agent declined to steer it into STATE's turn.
+
+Puts PROMPT back at STATE's live prompt for the user to edit and send
+again, and returns `kept'.  A busy shell that keeps no live prompt has
+nowhere to put it, so the prompt is queued instead and `queued' is
+returned."
+  (with-current-buffer (map-elt state :buffer)
+    (if (agent-shell--can-insert-into-prompt-p)
+        (progn (agent-shell--insert-to-shell-buffer
+                ;; Explicit, not left to `agent-shell--shell-buffer' to
+                ;; resolve.
+                :text prompt :no-focus t
+                :shell-buffer (map-elt state :buffer))
+               'kept)
+      (agent-shell--prompt-queue-enqueue :prompt prompt)
+      'queued)))
 
 (cl-defun agent-shell-experimental--render-steered-prompt (&key state prompt)
   "Render PROMPT into STATE's shell as the user prompt it is.

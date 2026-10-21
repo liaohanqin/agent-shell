@@ -9538,15 +9538,24 @@ refused, leaving the text recoverable from `minibuffer-history' alone."
                      (user-error (error-message-string error)))
                    "This agent does not support steering"))))
 
+(defvar agent-shell-tests--last-steer-note nil
+  "The note body `agent-shell-tests--steer-outcome' last reported.")
+
+(defvar agent-shell-tests--last-steer-above nil
+  "The `:above-last-prompt' value of the last reported steer decline.")
+
 (cl-defun agent-shell-tests--steer-outcome (&key outcome response identifier
-                                                busy request-failed)
+                                                busy request-failed
+                                                (insertable t))
   "Steer a prompt, answer with OUTCOME, and return what became of it.
 
 OUTCOME is the agent's answer verbatim, as it arrives on the wire.  BUSY
 is what `shell-maker-busy' reports while the answer is handled: a shell
 that has not yet processed its own `session/prompt' response is still
 busy even though the agent says the turn ended.  REQUEST-FAILED answers
-the request itself with an error instead.
+the request itself with an error instead.  INSERTABLE is what
+`agent-shell--can-insert-into-prompt-p' reports, that is, whether the
+busy shell keeps a live prompt to put a declined prompt back into.
 
 RESPONSE, when non-nil, is the answer verbatim for dialects that do not
 answer with OUTCOME, overriding it.  IDENTIFIER, when non-nil, is the
@@ -9556,8 +9565,9 @@ answers with RESPONSE.
 
 Returns the things that happened, in order: `rendered' (shown as a user
 prompt in the running turn), `submitted' (sent as an ordinary prompt),
-`queued' (added to the pending queue), `reported' (explained in a shell
-fragment) and `interrupted' (the running turn cancelled)."
+`kept' (put back at the live prompt, unsubmitted), `queued' (added to
+the pending queue), `reported' (explained in a shell fragment) and
+`interrupted' (the running turn cancelled)."
   (let ((happened)
         ;; A turn is running when the guards check, which is what lets the
         ;; steer go out at all.  BUSY is what the shell reports later, when
@@ -9585,6 +9595,8 @@ fragment) and `interrupted' (the running turn cancelled)."
               ((symbol-function 'agent-shell--prompt-content-blocks)
                (lambda (text) (vector (list (cons 'type "text")
                                             (cons 'text text)))))
+              ((symbol-function 'agent-shell--can-insert-into-prompt-p)
+               (lambda (&rest _) insertable))
               ((symbol-function 'agent-shell--cancel-idle-timer) #'ignore)
               ((symbol-function 'agent-shell--send-request)
                (lambda (&rest args)
@@ -9597,11 +9609,17 @@ fragment) and `interrupted' (the running turn cancelled)."
               ((symbol-function 'agent-shell-experimental--render-steered-prompt)
                (lambda (&rest _) (push 'rendered happened)))
               ((symbol-function 'agent-shell--insert-to-shell-buffer)
-               (lambda (&rest _) (push 'submitted happened)))
+               (lambda (&rest args)
+                 (push (if (plist-get args :submit) 'submitted 'kept) happened)))
               ((symbol-function 'agent-shell--prompt-queue-enqueue)
                (lambda (&rest _) (push 'queued happened)))
               ((symbol-function 'agent-shell--update-fragment)
-               (lambda (&rest _) (push 'reported happened))))
+               (lambda (&rest args)
+                 (setq agent-shell-tests--last-steer-note
+                       (plist-get args :body))
+                 (setq agent-shell-tests--last-steer-above
+                       (plist-get args :above-last-prompt))
+                 (push 'reported happened))))
       (agent-shell-prompt-steer "actually, just the filenames"))
     (nreverse happened)))
 
@@ -9614,12 +9632,16 @@ fragment) and `interrupted' (the running turn cancelled)."
                  '(submitted)))
   (should (equal (agent-shell-tests--steer-outcome :outcome "startedNewTurn")
                  '(reported)))
-  ;; Steering never queues: that is `agent-shell-prompt-queue''s job, and a
-  ;; queued prompt would reach the agent long after it was asked for.  The
-  ;; turn is interrupted so the agent does not carry on in a direction the
-  ;; user believes they already corrected.
+  ;; A decline that is not CodeBuddy's busy path never queues: that is
+  ;; `agent-shell-prompt-queue''s job, and a queued prompt would reach the
+  ;; agent long after it was asked for.  The turn is interrupted so the
+  ;; agent does not carry on in a direction the user believes they already
+  ;; corrected.
   (should (equal (agent-shell-tests--steer-outcome :outcome "failed")
                  '(reported interrupted)))
+  ;; Only a kept CodeBuddy prompt says anything about where it went.
+  (should-not (string-match-p "Prompt kept\\|Prompt queued"
+                              agent-shell-tests--last-steer-note))
   ;; An outcome no agent answers with today must not read as delivered.
   (should (equal (agent-shell-tests--steer-outcome :outcome "somethingNew")
                  '(reported interrupted)))
@@ -9656,16 +9678,62 @@ fragment) and `interrupted' (the running turn cancelled)."
                   :identifier 'codebuddy
                   :response '((steered)))
                  '(reported interrupted)))
-  ;; A shell that has not yet processed its own `session/prompt' response
-  ;; cannot act on an idle hand-back, so it reports and interrupts.
+  ;; CodeBuddy's "idle" also covers run states that are merely not
+  ;; steerable (preparing, compacting) while the turn is still running, so
+  ;; a busy shell keeps the prompt and leaves the turn alone instead of
+  ;; interrupting work the user never asked to drop.
   (should (equal (agent-shell-tests--steer-outcome
                   :identifier 'codebuddy :busy t
                   :response '((steered) (reason . "idle")))
-                 '(reported interrupted)))
+                 '(kept reported)))
+  (should (string-match-p "Prompt kept at the prompt"
+                          agent-shell-tests--last-steer-note))
+  ;; The note lands above the prompt it was put back at.
+  (should (eq agent-shell-tests--last-steer-above 'kept))
+  ;; Without a live prompt to put it back into, the busy shell queues it
+  ;; rather than lose it, and says so instead of claiming it was kept.
+  (should (equal (agent-shell-tests--steer-outcome
+                  :identifier 'codebuddy :busy t :insertable nil
+                  :response '((steered) (reason . "idle")))
+                 '(queued reported)))
+  (should (string-match-p "Prompt queued until the turn ends"
+                          agent-shell-tests--last-steer-note))
+  (should (eq agent-shell-tests--last-steer-above 'queued))
   ;; A request that never got an answer is handled like any other failure.
   (should (equal (agent-shell-tests--steer-outcome
                   :identifier 'codebuddy :request-failed t)
                  '(reported interrupted))))
+
+(ert-deftest agent-shell-experimental--keep-declined-prompt-keeps-at-prompt-test ()
+  "A busy shell puts a declined prompt back where the user can resend it."
+  (should (equal
+           (agent-shell-tests--with-persistent-prompt-shell
+            (lambda ()
+              (list :action (agent-shell-experimental--keep-declined-prompt
+                             :state (agent-shell--state)
+                             :prompt "just the filenames")
+                    :input (agent-shell--prompt-input)
+                    :pending (map-elt (agent-shell--state) :pending-prompts)))
+            :busy t)
+           '(:action kept :input "just the filenames" :pending nil))))
+
+(ert-deftest agent-shell-experimental--keep-declined-prompt-queues-without-live-prompt-test ()
+  "A busy shell with no live prompt queues the declined prompt instead."
+  (should (equal
+           (agent-shell-tests--with-persistent-prompt-shell
+            (lambda ()
+              ;; Output below the prompt makes it stale, leaving nowhere to
+              ;; put the prompt back into.
+              (let ((inhibit-read-only t))
+                (goto-char (point-max))
+                (insert (propertize "still streaming\n" 'field 'output)))
+              (list :action (agent-shell-experimental--keep-declined-prompt
+                             :state (agent-shell--state)
+                             :prompt "just the filenames")
+                    :input (agent-shell--prompt-input)
+                    :pending (map-elt (agent-shell--state) :pending-prompts)))
+            :busy t)
+           '(:action queued :input nil :pending ("just the filenames")))))
 
 (cl-defun agent-shell-tests--render-steered-prompt (prompt &key idle draft)
   "Render PROMPT into a bare shell buffer mid-turn.
