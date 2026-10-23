@@ -6912,6 +6912,57 @@ group-id helper alone."
       (should (equal "activity-1" (map-nested-elt state '(:tool-calls "A" :group-id))))
       (should (equal "activity-2" (map-nested-elt state '(:tool-calls "B" :group-id)))))))
 
+(ert-deftest agent-shell--subagent-tool-call-meta-test ()
+  "CodeBuddy subagent metadata reaches saved tool calls through dispatch.
+Also checks that a child's activity refreshes the subagent's label, and
+that a finished subagent's clock is not refreshed again."
+  (let ((state (agent-shell--make-state))
+        (refreshes nil))
+    (map-put! state :active-requests t)
+    (cl-letf (((symbol-function 'agent-shell--update-fragment)
+               (lambda (&rest args)
+                 (when (equal (plist-get args :block-id) "agent")
+                   (push (plist-get args :label-right) refreshes))))
+              ((symbol-function 'agent-shell--refresh-activity-group-header) #'ignore)
+              ((symbol-function 'agent-shell--append-transcript) #'ignore)
+              ((symbol-function 'agent-shell--make-transcript-tool-call-entry)
+               (lambda (&rest _) ""))
+              ((symbol-function 'agent-shell--delete-fragment) #'ignore)
+              ((symbol-function 'agent-shell--cancel-idle-timer) #'ignore)
+              ((symbol-function 'agent-shell--emit-event) #'ignore)
+              ((symbol-function 'agent-shell-make-tool-call-label)
+               (lambda (&rest _) '((:status . "s") (:title . "t")))))
+      (cl-flet ((notify (update)
+                  (agent-shell--on-notification
+                   :state state
+                   :acp-notification `((method . "session/update")
+                                       (params (update . ,update))))))
+        (notify '((sessionUpdate . "tool_call") (toolCallId . "agent")
+                  (title . "superpowers:code-reviewer") (kind . "other")
+                  (status . "in_progress")
+                  (_meta (codebuddy.ai/isSubagent . t))))
+        (should (eq (map-nested-elt state '(:tool-calls "agent" :subagent)) t))
+        (should (map-nested-elt state '(:tool-calls "agent" :start-time)))
+        ;; The subagent's own calls record which card they belong to, and
+        ;; keep that card's clock fresh.
+        (let ((before (length refreshes)))
+          (notify '((sessionUpdate . "tool_call") (toolCallId . "read")
+                    (title . "Read foo.el") (kind . "read")
+                    (status . "in_progress")
+                    (_meta (codebuddy.ai/parentToolCallId . "agent"))))
+          (should (> (length refreshes) before)))
+        (should (equal (map-nested-elt state '(:tool-calls "read" :parent-tool-call-id))
+                       "agent"))
+        ;; Completion freezes the subagent's clock.
+        (notify '((sessionUpdate . "tool_call_update") (toolCallId . "agent")
+                  (status . "completed") (content . [])))
+        (should (map-nested-elt state '(:tool-calls "agent" :end-time)))
+        ;; A late child update no longer touches the finished card.
+        (let ((settled (length refreshes)))
+          (notify '((sessionUpdate . "tool_call_update") (toolCallId . "read")
+                    (status . "completed") (content . [])))
+          (should (= (length refreshes) settled)))))))
+
 (ert-deftest agent-shell--activity-grouping-consecutive-share-group-test ()
   "Consecutive tool calls (no interleaving entry) share one group.
 Guards that the #31 fix does not over-split: an in-place completion update
@@ -8898,6 +8949,120 @@ stand in for whatever else the command runs."
     ;; A lone command stays as-is, trailing newline or not.
     (should (equal "cd /tmp" (funcall label "cd /tmp")))
     (should (equal "cd /tmp" (funcall label "cd /tmp\n")))))
+
+(ert-deftest agent-shell--format-elapsed-seconds-test ()
+  "Durations read short and stay readable past an hour."
+  (should (equal "0s" (agent-shell--format-elapsed-seconds 0)))
+  (should (equal "59s" (agent-shell--format-elapsed-seconds 59.9)))
+  (should (equal "1m 00s" (agent-shell--format-elapsed-seconds 60)))
+  (should (equal "1m 15s" (agent-shell--format-elapsed-seconds 75)))
+  (should (equal "1h 01m" (agent-shell--format-elapsed-seconds 3665))))
+
+(ert-deftest agent-shell-make-tool-call-label-subagent-test ()
+  "A subagent reads as its own card and its calls follow it."
+  (let* ((subagent-state
+          `((:tool-calls . (("agent" . ((:kind . "other")
+                                        (:status . "in_progress")
+                                        (:title . "superpowers:code-reviewer")
+                                        (:description . "Review fxgz limit change")
+                                        (:subagent . t)
+                                        (:start-time . 100.0)))))))
+         (label (lambda (state id)
+                  (substring-no-properties
+                   (map-elt (agent-shell-make-tool-call-label state id) :title)))))
+    (cl-letf (((symbol-function 'float-time) (lambda () 112.0)))
+      (should (equal "Subagent: superpowers:code-reviewer Review fxgz limit change · running 12s"
+                     (funcall label subagent-state "agent"))))
+    ;; Completion freezes the clock.
+    (let ((done (list (cons :tool-calls
+                            (list (cons "agent"
+                                        (map-merge 'alist
+                                                   (map-nested-elt subagent-state
+                                                                   '(:tool-calls "agent"))
+                                                   '((:status . "completed")
+                                                     (:end-time . 175.0)))))))))
+      (cl-letf (((symbol-function 'float-time) (lambda () 9999.0)))
+        (should (equal "Subagent: superpowers:code-reviewer Review fxgz limit change · 1m 15s"
+                       (funcall label done "agent")))))
+    ;; A clock frozen at turn end stops saying "running" without pretending
+    ;; the subagent completed.
+    (let ((frozen (list (cons :tool-calls
+                              (list (cons "agent"
+                                          (map-merge 'alist
+                                                     (map-nested-elt subagent-state
+                                                                     '(:tool-calls "agent"))
+                                                     '((:end-time . 175.0)))))))))
+      (cl-letf (((symbol-function 'float-time) (lambda () 9999.0)))
+        (should (equal "Subagent: superpowers:code-reviewer Review fxgz limit change · 1m 15s"
+                       (funcall label frozen "agent")))))
+    ;; A subagent's own calls carry an arrow; the card above is the context.
+    (let ((child `((:tool-calls . (("edit" . ((:kind . "edit")
+                                              (:status . "completed")
+                                              (:title . "file.el")
+                                              (:parent-tool-call-id . "agent"))))))))
+      (should (equal "↳ file.el" (funcall label child "edit"))))))
+
+(ert-deftest agent-shell--note-subagent-tool-call-test ()
+  "CodeBuddy's subagent metadata and clock are kept on the tool call."
+  (let ((state (list (cons :tool-calls (list (cons "agent" '((:kind . "other"))))))))
+    (cl-letf (((symbol-function 'float-time) (lambda () 100.0)))
+      (agent-shell--note-subagent-tool-call
+       state "agent"
+       '((params (update . ((_meta . ((codebuddy.ai/isSubagent . t)
+                                      (codebuddy.ai/subagentType . "superpowers:code-reviewer")))))))))
+    (should (eq (map-nested-elt state '(:tool-calls "agent" :subagent)) t))
+    (should (equal (map-nested-elt state '(:tool-calls "agent" :start-time)) 100.0))
+    ;; Completion stops the clock even though the update carries no meta.
+    (cl-letf (((symbol-function 'float-time) (lambda () 175.0)))
+      (agent-shell--note-subagent-tool-call
+       state "agent"
+       '((params (update . ((status . "completed")))))))
+    (should (equal (map-nested-elt state '(:tool-calls "agent" :end-time)) 175.0))
+    ;; A subagent's own call records which card it belongs to.
+    (agent-shell--save-tool-call state "edit" '((:kind . "edit")))
+    (agent-shell--note-subagent-tool-call
+     state "edit"
+     '((params (update . ((_meta . ((codebuddy.ai/parentToolCallId . "agent"))))))))
+    (should (equal (map-nested-elt state '(:tool-calls "edit" :parent-tool-call-id))
+                   "agent"))))
+
+(ert-deftest agent-shell--freeze-subagents-test ()
+  "Turn end stops running subagent clocks before tool-call state is cleared.
+The group header is refreshed too: once the group folds, it is all the
+user can still see."
+  (let ((state (list (cons :tool-calls
+                           (list (cons "agent" '((:kind . "other")
+                                                 (:status . "in_progress")
+                                                 (:title . "reviewer")
+                                                 (:subagent . t)
+                                                 (:group-id . "activity-1")
+                                                 (:start-time . 100.0)))
+                                 (cons "done" '((:kind . "other")
+                                                (:status . "completed")
+                                                (:title . "other")
+                                                (:subagent . t)
+                                                (:start-time . 50.0)
+                                                (:end-time . 60.0)))))))
+        (updated nil)
+        (headers nil)
+        (labels nil))
+    (cl-letf (((symbol-function 'float-time) (lambda () 150.0))
+              ((symbol-function 'agent-shell--update-fragment)
+               (lambda (&rest args)
+                 (when (equal (plist-get args :block-id) "agent")
+                   (push (plist-get args :label-right) labels))
+                 (push (plist-get args :block-id) updated)))
+              ((symbol-function 'agent-shell--refresh-activity-group-header)
+               (lambda (_state group-id) (push group-id headers))))
+      (agent-shell--freeze-subagents state))
+    (should (equal (map-nested-elt state '(:tool-calls "agent" :end-time)) 150.0))
+    ;; An already finished subagent keeps the duration it showed.
+    (should (equal (map-nested-elt state '(:tool-calls "done" :end-time)) 60.0))
+    (should (equal updated '("agent")))
+    (should (equal headers '("activity-1")))
+    ;; The frozen label drops "running" instead of ticking forever.
+    (should (equal "Subagent: reviewer · 50s"
+                   (substring-no-properties (car labels))))))
 
 (ert-deftest agent-shell-make-tool-call-label-long-command-fits-line-test ()
   "A long command standing in for a missing description stays on one line.

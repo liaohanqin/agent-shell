@@ -3711,6 +3711,10 @@ Clears STATE's `:expanded-activity-group'."
                     (when-let* ((diffs (agent-shell--make-diff-infos
                                         :acp-tool-call (map-nested-elt acp-notification '(params update)))))
                       (list (cons :diffs diffs)))))
+           (agent-shell--note-subagent-tool-call
+            state
+            (map-nested-elt acp-notification '(params update toolCallId))
+            acp-notification)
            (agent-shell--cancel-idle-timer)
            (agent-shell--emit-event
             :event 'tool-call-update
@@ -3741,6 +3745,11 @@ Clears STATE's `:expanded-activity-group'."
                 :body (agent-shell--format-plan (map-nested-elt acp-notification '(params update rawInput plan)))
                 :expanded t
                 :above-last-prompt (not (agent-shell--active-requests-p state)))))
+           ;; A subagent's own tool call keeps the subagent's label ticking
+           ;; without a timer of its own.
+           (when-let* ((tool-call-id (map-nested-elt acp-notification '(params update toolCallId)))
+                       (parent-id (map-nested-elt state `(:tool-calls ,tool-call-id :parent-tool-call-id))))
+             (agent-shell--refresh-subagent-label state parent-id))
            (map-put! state :last-entry-type "tool_call"))
           ((equal (map-nested-elt acp-notification '(params update sessionUpdate)) "agent_thought_chunk")
            (let ((new-thought-p (not (equal (map-elt state :last-entry-type)
@@ -3914,6 +3923,10 @@ Clears STATE's `:expanded-activity-group'."
                     (when-let* ((diffs (agent-shell--make-diff-infos
                                         :acp-tool-call (map-nested-elt acp-notification '(params update)))))
                       (list (cons :diffs diffs)))))
+           (agent-shell--note-subagent-tool-call
+            state
+            (map-nested-elt acp-notification '(params update toolCallId))
+            acp-notification)
            ;; OpenCode sends tool_call_update with the populated rawInput
            ;; after session/request_permission, so an open permission
            ;; dialog needs a re-render to surface the arguments.
@@ -4028,7 +4041,11 @@ Clears STATE's `:expanded-activity-group'."
                 :expanded agent-shell-tool-use-expand-by-default
                 :above-last-prompt (not (agent-shell--active-requests-p state)))
                (agent-shell--refresh-activity-group-header state group-id)
-               (agent-shell--sync-activity-group-fold :state state :group-id group-id))
+               (agent-shell--sync-activity-group-fold :state state :group-id group-id)
+               ;; A subagent's own tool call keeps the subagent's label
+               ;; ticking without a timer of its own.
+               (when-let* ((parent-id (map-nested-elt state `(:tool-calls ,tool-call-id :parent-tool-call-id))))
+                 (agent-shell--refresh-subagent-label state parent-id)))
              ;; Only advance the run boundary when this update introduced a new
              ;; tool call (appended at the end).  An in-place update of an
              ;; earlier tool must not erase an intervening entry's boundary.
@@ -4830,6 +4847,57 @@ DIFFS is a list of diff infos as returned by
             tool-call-overrides))
     (map-put! state :tool-calls updated-tools)))
 
+(defun agent-shell--note-subagent-tool-call (state tool-call-id acp-notification)
+  "Record subagent metadata from ACP-NOTIFICATION for TOOL-CALL-ID in STATE.
+
+CodeBuddy marks the tool call that spawns a subagent with
+`codebuddy.ai/isSubagent' and the subagent's own tool calls with
+`codebuddy.ai/parentToolCallId'.  Keep both, plus when the subagent
+started and ended, so its label can show that it is running and for how
+long."
+  (let* ((update (map-nested-elt acp-notification '(params update)))
+         (meta (map-elt update '_meta))
+         (is-subagent (map-elt meta 'codebuddy.ai/isSubagent))
+         (parent-id (let ((id (map-elt meta 'codebuddy.ai/parentToolCallId)))
+                      (and (stringp id) (not (string-empty-p id)) id)))
+         (status (map-elt update 'status))
+         (tool-call (map-nested-elt state `(:tool-calls ,tool-call-id))))
+    (when is-subagent
+      (agent-shell--save-tool-call
+       state tool-call-id
+       (append (list (cons :subagent t))
+               (when (and (member status '(nil "pending" "in_progress"))
+                          (not (map-elt tool-call :start-time)))
+                 (list (cons :start-time (float-time)))))))
+    (when parent-id
+      (agent-shell--save-tool-call
+       state tool-call-id
+       (list (cons :parent-tool-call-id parent-id))))
+    (when (and (or is-subagent (map-elt tool-call :subagent))
+               (member status '("completed" "failed"))
+               (not (map-elt tool-call :end-time)))
+      (agent-shell--save-tool-call
+       state tool-call-id
+       (list (cons :end-time (float-time)))))))
+
+(defun agent-shell--freeze-subagents (state)
+  "Stop subagent clocks in STATE before its tool-call state is cleared.
+
+A background subagent can outlive the turn, but its card no longer has
+state to refresh from after the turn ends.  Freeze the duration it
+reached so the card does not claim to be running forever."
+  (map-do (lambda (tool-call-id tool-call)
+            (when (and (map-elt tool-call :subagent)
+                       (member (map-elt tool-call :status)
+                               '("pending" "in_progress"))
+                       (not (map-elt tool-call :end-time)))
+              (agent-shell--save-tool-call
+               state tool-call-id (list (cons :end-time (float-time))))
+              ;; Also refreshes the group header, which is all that remains
+              ;; visible once turn end folds the group.
+              (agent-shell--refresh-subagent-label state tool-call-id)))
+          (map-elt state :tool-calls)))
+
 (cl-defun agent-shell--make-boxed-message (&key text width)
   "Return TEXT framed in a rounded Unicode box.
 When WIDTH is nil, the box auto-sizes to fit TEXT (respecting any
@@ -5163,6 +5231,22 @@ For example, the \"(10 - 20)\" in \"file.el (10 - 20)\" is dimmed."
                          title))
     title))
 
+(defun agent-shell--format-elapsed-seconds (seconds)
+  "Format SECONDS as a short human-readable duration.
+
+  (agent-shell--format-elapsed-seconds 75)
+  ;; => \"1m 15s\"
+
+  (agent-shell--format-elapsed-seconds 3665)
+  ;; => \"1h 01m\""
+  (let ((seconds (max 0 (floor seconds))))
+    (cond ((< seconds 60)
+           (format "%ds" seconds))
+          ((< seconds 3600)
+           (format "%dm %02ds" (/ seconds 60) (% seconds 60)))
+          (t
+           (format "%dh %02dm" (/ seconds 3600) (% (/ seconds 60) 60))))))
+
 (defun agent-shell-make-tool-call-label (state tool-call-id)
   "Create tool call label from STATE using TOOL-CALL-ID.
 
@@ -5217,11 +5301,60 @@ Returns propertized labels in :status and :title propertized."
                          (agent-shell--propertize-tool-call-title
                           :title title :kind (map-elt tool-call :kind)))
                         (description
-                         (propertize description 'font-lock-face 'default)))))
+                         (propertize description 'font-lock-face 'default))))
+           ;; A spawned subagent reads as its own kind of card, carrying
+           ;; however long it has been running.
+           (elapsed (when-let* (((map-elt tool-call :subagent))
+                                (start (map-elt tool-call :start-time))
+                                ((member (map-elt tool-call :status)
+                                         '("in_progress" "completed" "failed"))))
+                      (concat
+                       " · "
+                       (if (and (equal (map-elt tool-call :status) "in_progress")
+                                (not (map-elt tool-call :end-time)))
+                           "running "
+                         "")
+                       (agent-shell--format-elapsed-seconds
+                        (- (or (map-elt tool-call :end-time)
+                               (float-time))
+                           start)))))
+           (final-label (cond ((map-elt tool-call :subagent)
+                               (concat
+                                (if (map-elt tool-call :parent-tool-call-id)
+                                    "↳ " "")
+                                (if label (concat "Subagent: " label) "Subagent")))
+                              ;; The subagent's own calls follow the card
+                              ;; above, so mark them as belonging to it.
+                              ((map-elt tool-call :parent-tool-call-id)
+                               (when label (concat "↳ " label)))
+                              (t label)))
+           (display-label (when final-label
+                            (concat final-label (or elapsed "")))))
       `((:status . ,status)
-        (:title . ,(if (and label stats)
-                       (concat label " " stats)
-                     (or label stats)))))))
+        (:title . ,(if (and display-label stats)
+                       (concat display-label " " stats)
+                     (or display-label stats)))))))
+
+(defun agent-shell--refresh-subagent-label (state tool-call-id)
+  "Refresh TOOL-CALL-ID's label in STATE while its subagent is running."
+  (when-let* ((tool-call (map-nested-elt state `(:tool-calls ,tool-call-id)))
+              ((map-elt tool-call :subagent))
+              ((member (map-elt tool-call :status) '("pending" "in_progress")))
+              (labels (agent-shell-make-tool-call-label state tool-call-id)))
+    (agent-shell--update-fragment
+     :state state
+     :block-id tool-call-id
+     :label-left (map-elt labels :status)
+     :label-right (map-elt labels :title)
+     :group-id (map-elt tool-call :group-id)
+     :group-label agent-shell--activity-group-label
+     :group-expanded (agent-shell--activity-group-initial-expanded-p)
+     :expanded agent-shell-tool-use-expand-by-default
+     :above-last-prompt (not (agent-shell--active-requests-p state)))
+    ;; A lone group header stands in for its only member's label, so it
+    ;; carries the same clock.
+    (when-let* ((group-id (map-elt tool-call :group-id)))
+      (agent-shell--refresh-activity-group-header state group-id))))
 
 (defun agent-shell--format-plan (entries)
   "Format plan ENTRIES for shell rendering.
@@ -9604,6 +9737,7 @@ reads the buffer's prompt capabilities."
                    ;; Tool call details are no longer needed after
                    ;; a session prompt request is finished.
                    ;; Avoid accumulating them unnecessarily.
+                   (agent-shell--freeze-subagents (agent-shell--state))
                    (map-put! (agent-shell--state) :tool-calls nil)
                    (agent-shell-elicitation--clear :state (agent-shell--state))
                    ;; The turn is over, so nothing is active any more: fold
