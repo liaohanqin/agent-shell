@@ -3318,6 +3318,28 @@ result is reversed to reflect the order the calls were made."
                  pair))
              (map-elt state :tool-calls))))
 
+(defun agent-shell--subagent-status-live-p (status)
+  "Return non-nil when subagent STATUS can mean the subagent is active.
+
+CodeBuddy can leave a subagent `pending' for its whole run, so a missing
+status, `pending', `in_progress', and `running' all qualify."
+  (or (null status)
+      (member status '("pending" "in_progress" "running"))))
+
+(defun agent-shell--subagent-running-p (tool-call)
+  "Return non-nil when TOOL-CALL's subagent has not finished yet.
+
+The status stays live until an `:end-time' freezes the clock."
+  (and (map-elt tool-call :subagent)
+       (agent-shell--subagent-status-live-p (map-elt tool-call :status))
+       (not (map-elt tool-call :end-time))))
+
+(defun agent-shell--group-running-subagents (state group-id)
+  "Return running subagent (ID . TOOL-CALL) pairs in STATE's GROUP-ID."
+  (seq-filter (lambda (pair)
+                (agent-shell--subagent-running-p (cdr pair)))
+              (agent-shell--group-tool-calls :state state :group-id group-id)))
+
 (defun agent-shell--count-group-thought (state group-id)
   "Record one more thought for the activity group GROUP-ID in STATE.
 
@@ -3438,8 +3460,9 @@ read a file\", in first-seen order.  Only the first word is capitalized.
 Reads, edits, and deletes count distinct reported file paths when all
 calls of that kind report paths; otherwise they retain the call count.
 A kind reads in the present tense (\"Run a command\") while any of its
-members is still pending or in progress, past tense once all have
-finished.
+members is still pending, in progress, or running (a subagent whose
+status has not arrived yet also qualifies), past tense once all have
+finished or been frozen at turn end.
 
 When THOUGHT is non-nil, or any member is a `think'-kind call, the group
 also contains a thought, summarized as a leading \"Thought\" phrase
@@ -3458,8 +3481,12 @@ Thoughts are not counted."
                                           (equal (funcall member-kind member) kind))
                                         tool-members))
                     (pending (seq-some (lambda (member)
-                                         (member (map-elt (cdr member) :status)
-                                                 '("pending" "in_progress")))
+                                         (let ((tool-call (cdr member)))
+                                           (and (or (member (map-elt tool-call :status)
+                                                            '("pending" "in_progress" "running"))
+                                                    (and (map-elt tool-call :subagent)
+                                                         (null (map-elt tool-call :status))))
+                                                (not (map-elt tool-call :end-time)))))
                                        of-kind))
                     (paths (when (member kind '("read" "edit" "delete"))
                              (seq-map (lambda (member)
@@ -3585,6 +3612,13 @@ Called with an alist containing:
 Returns the propertized header string, or nil when the group is empty (no
 tool calls or thoughts yet).
 
+While a subagent in the group is still running,
+`agent-shell--refresh-activity-group-header' appends that subagent's
+card label (including its elapsed time) to this function's output, so
+folding the group does not hide it.  Only the first running subagent is
+named; the rest are summarized as \" (+N more)\".  A lone subagent whose
+label already is this function's output is not repeated.
+
 Built-in options:
 - `agent-shell-activity-group-count-label' -- count style,
   e.g. \"✓ Activity 2/2\".
@@ -3598,16 +3632,46 @@ style settles; promote it once the rendering choice is worth exposing.")
 
 (defun agent-shell--refresh-activity-group-header (state group-id)
   "Relabel GROUP-ID's header in STATE from its tool calls and thoughts.
-Delegates to `agent-shell-activity-group-header-label-function'.
-No-op while that function has nothing to summarize (an empty group)."
-  (when-let* ((label (funcall agent-shell-activity-group-header-label-function
+Delegates to `agent-shell-activity-group-header-label-function', then
+appends the label of the first running subagent, so folding the group
+does not hide that it is running.  Additional running subagents are
+counted as \" (+N more)\".  A lone subagent whose label already is the
+base label is not repeated.
+No-op when there is nothing to summarize (an empty group)."
+  (let* ((base-label (funcall agent-shell-activity-group-header-label-function
                               (list (cons :state state)
-                                    (cons :group-id group-id)))))
-    (agent-shell--update-fragment
-     :state state
-     :block-id group-id
-     :label-left label
-     :above-last-prompt (not (agent-shell--active-requests-p state)))))
+                                    (cons :group-id group-id))))
+         (running-subagents (agent-shell--group-running-subagents state group-id))
+         (subagent-label
+          (when running-subagents
+            (when-let* ((card-label (map-elt (agent-shell-make-tool-call-label
+                                              state (caar running-subagents))
+                                             :title)))
+              (concat
+               card-label
+               (when (> (length running-subagents) 1)
+                 (propertize (format " (+%d more)"
+                                     (1- (length running-subagents)))
+                             'font-lock-face 'agent-shell-secondary))))))
+         (label (cond ((null subagent-label)
+                       base-label)
+                      ((null base-label)
+                       subagent-label)
+                      ;; The default descriptive label already shows a lone
+                      ;; descriptive member's own title; skip the duplicate.
+                      ;; Label functions are opaque, so this is a text check.
+                      ((string-search "Subagent:" base-label)
+                       base-label)
+                      (t
+                       (concat base-label
+                               (propertize " · " 'font-lock-face 'agent-shell-secondary)
+                               subagent-label)))))
+    (when label
+      (agent-shell--update-fragment
+       :state state
+       :block-id group-id
+       :label-left label
+       :above-last-prompt (not (agent-shell--active-requests-p state))))))
 
 (cl-defun agent-shell--sync-activity-group-fold (&key state group-id namespace-id)
   "Leave GROUP-ID the only expanded activity group in STATE.
@@ -4912,7 +4976,7 @@ long."
       (agent-shell--save-tool-call
        state tool-call-id
        (append (list (cons :subagent t))
-               (when (and (member status '(nil "pending" "in_progress"))
+               (when (and (agent-shell--subagent-status-live-p status)
                           (not (map-elt tool-call :start-time)))
                  (list (cons :start-time (float-time)))))))
     (when parent-id
@@ -4927,16 +4991,13 @@ long."
        (list (cons :end-time (float-time)))))))
 
 (defun agent-shell--freeze-subagents (state)
-  "Stop subagent clocks in STATE before its tool-call state is cleared.
+  "Stop subagent clocks in STATE before the cards stop being refreshed.
 
-A background subagent can outlive the turn, but its card no longer has
-state to refresh from after the turn ends.  Freeze the duration it
-reached so the card does not claim to be running forever."
+Turn end and an interrupted turn both end the turn's event stream, so a
+card would otherwise keep claiming to be running forever.  Freeze the
+duration it reached."
   (map-do (lambda (tool-call-id tool-call)
-            (when (and (map-elt tool-call :subagent)
-                       (member (map-elt tool-call :status)
-                               '("pending" "in_progress"))
-                       (not (map-elt tool-call :end-time)))
+            (when (agent-shell--subagent-running-p tool-call)
               (agent-shell--save-tool-call
                state tool-call-id (list (cons :end-time (float-time))))
               ;; Also refreshes the group header, which is all that remains
@@ -5352,12 +5413,13 @@ Returns propertized labels in :status and :title propertized."
            ;; however long it has been running.
            (elapsed (when-let* (((map-elt tool-call :subagent))
                                 (start (map-elt tool-call :start-time))
-                                ((member (map-elt tool-call :status)
-                                         '("in_progress" "completed" "failed"))))
+                                ((or (agent-shell--subagent-status-live-p
+                                      (map-elt tool-call :status))
+                                     (member (map-elt tool-call :status)
+                                             '("completed" "failed")))))
                       (concat
                        " · "
-                       (if (and (equal (map-elt tool-call :status) "in_progress")
-                                (not (map-elt tool-call :end-time)))
+                       (if (agent-shell--subagent-running-p tool-call)
                            "running "
                          "")
                        (agent-shell--format-elapsed-seconds
@@ -5382,10 +5444,15 @@ Returns propertized labels in :status and :title propertized."
                      (or display-label stats)))))))
 
 (defun agent-shell--refresh-subagent-label (state tool-call-id)
-  "Refresh TOOL-CALL-ID's label in STATE while its subagent is running."
+  "Refresh TOOL-CALL-ID's label in STATE while its subagent is running.
+
+Runs once more after turn end freezes the clock, so the card settles on
+its final elapsed time."
   (when-let* ((tool-call (map-nested-elt state `(:tool-calls ,tool-call-id)))
               ((map-elt tool-call :subagent))
-              ((member (map-elt tool-call :status) '("pending" "in_progress")))
+              ;; Not `agent-shell--subagent-running-p': turn end freezes the
+              ;; clock first, then refreshes the label one last time.
+              ((agent-shell--subagent-status-live-p (map-elt tool-call :status)))
               (labels (agent-shell-make-tool-call-label state tool-call-id)))
     (agent-shell--update-fragment
      :state state
@@ -5397,8 +5464,8 @@ Returns propertized labels in :status and :title propertized."
      :group-expanded (agent-shell--activity-group-initial-expanded-p)
      :expanded agent-shell-tool-use-expand-by-default
      :above-last-prompt (not (agent-shell--active-requests-p state)))
-    ;; A lone group header stands in for its only member's label, so it
-    ;; carries the same clock.
+    ;; The group header carries the same clock, so it still shows the
+    ;; subagent after the group folds.
     (when-let* ((group-id (map-elt tool-call :group-id)))
       (agent-shell--refresh-activity-group-header state group-id))))
 
@@ -9925,6 +9992,9 @@ Continue?" (agent-shell--prompt-queue-summary)))
                    (agent-shell--separate-transcript-after-agent-message
                     :last-entry-type (map-elt agent-shell--state :last-entry-type)
                     :file-path agent-shell--transcript-file)
+                   ;; An interrupted turn may not report a final status, so
+                   ;; freeze running subagents before folding their cards.
+                   (agent-shell--freeze-subagents agent-shell--state)
                    ;; An interrupted turn leaves no group active either.
                    (agent-shell--collapse-expanded-activity-group agent-shell--state)
                    ;; Display pending requests on failure.
