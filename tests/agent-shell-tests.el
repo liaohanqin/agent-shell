@@ -9195,6 +9195,17 @@ stand in for whatever else the command runs."
     (cl-letf (((symbol-function 'float-time) (lambda () 112.0)))
       (should (equal "Subagent: superpowers:code-reviewer Review fxgz limit change · running 12s"
                      (funcall label subagent-state "agent"))))
+    ;; CodeBuddy can leave a subagent `pending' for its whole run; the clock
+    ;; must still read as running.
+    (let ((pending (list (cons :tool-calls
+                               (list (cons "agent"
+                                           (map-merge 'alist
+                                                      (map-nested-elt subagent-state
+                                                                      '(:tool-calls "agent"))
+                                                      '((:status . "pending")))))))))
+      (cl-letf (((symbol-function 'float-time) (lambda () 112.0)))
+        (should (equal "Subagent: superpowers:code-reviewer Review fxgz limit change · running 12s"
+                       (funcall label pending "agent")))))
     ;; Completion freezes the clock.
     (let ((done (list (cons :tool-calls
                             (list (cons "agent"
@@ -9223,6 +9234,83 @@ stand in for whatever else the command runs."
                                               (:title . "file.el")
                                               (:parent-tool-call-id . "agent"))))))))
       (should (equal "↳ file.el" (funcall label child "edit"))))))
+
+(ert-deftest agent-shell--activity-group-header-running-subagent-test ()
+  "A running subagent is appended to the group header when the group folds.
+The summary and its status stay, so folding hides neither context, and a
+finished subagent lets the plain summary return."
+  (let* ((state `((:tool-calls . (("agent" . ((:kind . "other")
+                                              (:status . "pending")
+                                              (:title . "code-reviewer")
+                                              (:description . "Review change")
+                                              (:subagent . t)
+                                              (:group-id . "activity-1")
+                                              (:start-time . 100.0)))
+                                ("run" . ((:kind . "execute")
+                                          (:status . "completed")
+                                          (:title . "make")
+                                          (:group-id . "activity-1")))))))
+         (done (copy-tree state))
+         (two (copy-tree state))
+         (unknown (copy-tree state))
+         (only (list (cons :tool-calls
+                           (list (cons "agent"
+                                       (map-nested-elt state
+                                                       '(:tool-calls "agent")))))))
+         (labels nil))
+    (dolist (pair (map-elt done :tool-calls))
+      (when (equal (car pair) "agent")
+        (setcdr pair (map-merge 'alist (cdr pair)
+                                '((:status . "completed")
+                                  (:end-time . 175.0))))))
+    ;; CodeBuddy can omit the status entirely.
+    (dolist (pair (map-elt unknown :tool-calls))
+      (when (equal (car pair) "agent")
+        (setcdr pair (map-merge 'alist (cdr pair) '((:status . nil))))))
+    (map-put! two :tool-calls
+              (cons (cons "agent-2"
+                          '((:kind . "other")
+                            (:status . "pending")
+                            (:title . "second-reviewer")
+                            (:subagent . t)
+                            (:group-id . "activity-1")
+                            (:start-time . 110.0)))
+                    (map-elt two :tool-calls)))
+    (cl-letf (((symbol-function 'float-time) (lambda () 175.0))
+              ((symbol-function 'agent-shell--active-requests-p) #'ignore)
+              ((symbol-function 'agent-shell--update-fragment)
+               (lambda (&rest args)
+                 (push (cons (plist-get args :block-id)
+                             (plist-get args :label-left))
+                       labels))))
+      (agent-shell--refresh-activity-group-header state "activity-1")
+      (should (equal "activity-1" (caar labels)))
+      (should (equal (concat "Ran a command, run a tool call · "
+                             "Subagent: code-reviewer Review change · running 1m 15s")
+                     (substring-no-properties (cdar labels))))
+      ;; A finished subagent leaves the plain summary.
+      (setq labels nil)
+      (agent-shell--refresh-activity-group-header done "activity-1")
+      (should (equal "Ran a command, ran a tool call"
+                     (substring-no-properties (cdar labels))))
+      ;; A subagent with no status still reads as running in both the
+      ;; summary tense and the appended label.
+      (setq labels nil)
+      (agent-shell--refresh-activity-group-header unknown "activity-1")
+      (should (equal (concat "Ran a command, run a tool call · "
+                             "Subagent: code-reviewer Review change · running 1m 15s")
+                     (substring-no-properties (cdar labels))))
+      ;; A lone subagent already stands in for the summary; don't repeat it.
+      (setq labels nil)
+      (agent-shell--refresh-activity-group-header only "activity-1")
+      (should (equal "Subagent: code-reviewer Review change · running 1m 15s"
+                     (substring-no-properties (cdar labels))))
+      ;; Only the first of several running subagents is named.
+      (setq labels nil)
+      (agent-shell--refresh-activity-group-header two "activity-1")
+      (should (string-suffix-p
+               "Subagent: code-reviewer Review change · running 1m 15s (+1 more)"
+               (substring-no-properties (cdar labels)))))))
 
 (ert-deftest agent-shell--note-subagent-tool-call-test ()
   "CodeBuddy's subagent metadata and clock are kept on the tool call."
