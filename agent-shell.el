@@ -12683,14 +12683,59 @@ For example:
 (defvar-local agent-shell--realign-timer nil
   "Pending idle timer that re-aligns this buffer's rendered markdown.")
 
+(defvar-local agent-shell--realign-width nil
+  "Window pixel width at this buffer's last completed re-align, or nil.
+Nil means no re-align has settled this buffer at any width yet, so the
+next pass must scan.")
+
+(defvar-local agent-shell--realign-display-count nil
+  "`buffer-display-count' at this buffer's last completed re-align.
+Together with `agent-shell--realign-width' this remembers which display
+the recorded width belongs to, so a buffer that left its window and came
+back at the same width still scans.")
+
+(defun agent-shell--forget-realign ()
+  "Forget that the current buffer settled at any width.
+
+The next `agent-shell--realign-rendered' pass scans then, whatever the
+window width.  A caller that replaces a buffer's rendered content in
+place needs this: the new content carries layouts measured somewhere
+else, which a matching window width alone cannot vouch for."
+  (setq agent-shell--realign-width nil
+        agent-shell--realign-display-count nil))
+
 (defun agent-shell--realign-rendered (buffer)
   "Re-align BUFFER's window-relative markdown: tables and images.
-Deferred worker for `agent-shell--realign-on-change'."
+Deferred worker for `agent-shell--realign-on-change'.
+
+Ordinary streaming output schedules this many times a second, and each
+pass walks every rendered table and image.  A pass over content that
+cannot have gone stale scans nothing: same width, same display, and
+nothing rendered since the last pass (see
+`agent-shell-markdown--tables-rendered' and
+`agent-shell-markdown--images-pending').  Everything else scans -- a
+resize, a first display, a re-display at the width it settled at (the
+content may have been laid out elsewhere in between), a render since
+the last pass, and any caller of `agent-shell--forget-realign'."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq agent-shell--realign-timer nil)
-      (agent-shell-markdown-rerender-tables)
-      (agent-shell-markdown-rerender-images))))
+      (if-let* ((window (get-buffer-window buffer t))
+                (width (window-body-width window t)))
+          (unless (and (eql width agent-shell--realign-width)
+                       (eql buffer-display-count
+                            agent-shell--realign-display-count)
+                       (null agent-shell-markdown--tables-rendered)
+                       (null agent-shell-markdown--images-pending))
+            (agent-shell-markdown-rerender-tables)
+            (agent-shell-markdown-rerender-images)
+            (setq agent-shell--realign-width width
+                  agent-shell--realign-display-count buffer-display-count))
+        ;; Shown nowhere: nothing to measure against, so this settles
+        ;; nothing.  Drop the recorded width too, or a buffer that comes
+        ;; back at the width it settled at before would skip the scan,
+        ;; though its content may have been laid out elsewhere since.
+        (agent-shell--forget-realign)))))
 
 (defun agent-shell--realign-on-change (window)
   "Re-align the window-relative markdown of the buffer shown in WINDOW.
@@ -12733,9 +12778,9 @@ Installs buffer-local window-change handlers (see
 for this buffer's windows and are removed automatically when the
 buffer is killed.  Added to `agent-shell-mode-hook' and
 `agent-shell-viewport-view-mode-hook' so both the shell and its
-viewport realign.  The buffer-change hook invalidates the settled
-width, so even a same-size window switch checks content rendered
-off-screen."
+viewport realign.  Replacing a buffer's rendered content in place does
+not fire these hooks; such a caller forgets the settled width itself
+(see `agent-shell--forget-realign') before scheduling a pass."
   (add-hook 'window-size-change-functions
             #'agent-shell--realign-on-change nil t)
   (add-hook 'window-buffer-change-functions

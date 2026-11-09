@@ -878,6 +878,34 @@ it is still picked up by the bare-URL linkifier."
                            (get-text-property (point-min) 'help-echo)))))
       (delete-file image-file))))
 
+(ert-deftest agent-shell-markdown-image-render-marks-images-pending ()
+  ;; Rendering an image sized against the window leaves
+  ;; `agent-shell-markdown--images-pending' set, which is what makes the
+  ;; re-align pass scan a buffer that already settled at its width.  An
+  ;; image the markup itself sizes in pixels tracks no window, so it must
+  ;; not set the flag.
+  (let ((image-file (make-temp-file "agent-shell-test" nil ".svg")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'display-graphic-p) (lambda (&optional _d) t))
+                  ((symbol-function 'image-supported-file-p) (lambda (_f) t))
+                  ((symbol-function 'create-image)
+                   (lambda (&rest _) '(image :type svg :fake t)))
+                  ((symbol-function 'image-flush) (lambda (&rest _) nil)))
+          (with-temp-buffer
+            (insert (format "![svg graphics](%s)\n" image-file))
+            (agent-shell-markdown-replace-markup :render-images t)
+            (should agent-shell-markdown--images-pending))
+          (with-temp-buffer
+            (insert (format "%s\n" image-file))
+            (agent-shell-markdown-replace-markup :render-images t)
+            (should agent-shell-markdown--images-pending))
+          ;; A pixel-sized image is not window-relative.
+          (with-temp-buffer
+            (insert (format "![svg](%s){width=40px}\n" image-file))
+            (agent-shell-markdown-replace-markup :render-images t)
+            (should-not agent-shell-markdown--images-pending)))
+      (delete-file image-file))))
+
 (ert-deftest agent-shell-markdown-image-reconstructs-to-source ()
   ;; A rendered `![alt](url)' image shows only the alt placeholder, but
   ;; `agent-shell-copy-as-markdown' must round-trip it back to the original

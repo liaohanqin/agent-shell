@@ -55,6 +55,7 @@
 (declare-function agent-shell--state "agent-shell")
 (declare-function agent-shell--prompt-queue-echo "agent-shell-prompt-queue")
 (declare-function agent-shell--realign-on-change "agent-shell")
+(declare-function agent-shell--forget-realign "agent-shell")
 (declare-function agent-shell--filter-buffer-substring "agent-shell")
 (declare-function agent-shell-buffers "agent-shell")
 (declare-function agent-shell-goto-last-interaction "agent-shell")
@@ -406,6 +407,12 @@ Optionally set its PROMPT and RESPONSE."
   (let ((inhibit-read-only t)
         (viewport-buffer (current-buffer)))
     (erase-buffer)
+    ;; The content below is the shell buffer's already-rendered text, so
+    ;; its tables and images carry the width they were laid out against
+    ;; wherever that happened -- possibly another window or none at all.
+    ;; Whatever width this buffer last settled at says nothing about the
+    ;; new content, so forget it; the realign scheduled below must scan.
+    (agent-shell--forget-realign)
     (when-let* ((shell-buffer (agent-shell-viewport--shell-buffer)))
       (with-current-buffer shell-buffer
         (unless (eq agent-shell-header-style 'graphical)

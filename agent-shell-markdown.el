@@ -1448,6 +1448,14 @@ has fully streamed in after it, returns nil."
         (goto-char pos)
         (looking-at-p "{[^}\n]*\\'"))))
 
+(defvar-local agent-shell-markdown--images-pending nil
+  "Non-nil when a window-relative image was rendered since the last check.
+Set by `agent-shell-markdown--replace-images' and the bare-path image
+pass, for images sized against the window.  Cleared by
+`agent-shell-markdown-rerender-images' only when it gets through its
+scan: a pass that signals, or one with no window to measure against,
+leaves the flag set so the next pass runs.")
+
 (cl-defun agent-shell-markdown--replace-images (&key avoid-ranges image-cache-directory complete)
   "Replace `![alt](url)' image markup with displayed images.
 
@@ -1599,7 +1607,8 @@ For example, the buffer \"see ![logo](logo.png)\" becomes
                                        width-ratio)
                     (put-text-property
                      markup-start end 'agent-shell-markdown-image-window-width
-                     (agent-shell-markdown--displayed-window-width))))))
+                     (agent-shell-markdown--displayed-window-width))
+                    (setq agent-shell-markdown--images-pending t)))))
              ;; Remote image we couldn't show inline (no cache configured, the
              ;; download failed, or a non-graphical display): render a link
              ;; that opens the url, rather than leaving raw `![alt](url)' text.
@@ -1689,6 +1698,7 @@ renders the image in place of that text."
                 (put-text-property
                  path-start path-end 'agent-shell-markdown-image-window-width
                  (agent-shell-markdown--displayed-window-width))
+                (setq agent-shell-markdown--images-pending t)
                 (add-text-properties path-start path-end
                                      '(agent-shell-markdown-frozen t
                                                                    rear-nonsticky (agent-shell-markdown-frozen))))))))))))
@@ -4096,29 +4106,38 @@ A no-op when the buffer isn't displayed or every image already matches
 the current width, so it is safe to call on display and on resize."
   (when-let* ((window (get-buffer-window (current-buffer) t))
               (width (window-body-width window t)))
-    ;; A re-size, not a content change: keep it off the undo list and
-    ;; don't flip the buffer's modified flag.
-    (let ((inhibit-read-only t)
-          (buffer-undo-list t)
-          (modified (buffer-modified-p)))
-      (save-excursion
-        (goto-char (point-min))
-        (let (match)
-          (while (setq match (text-property-search-forward
-                              'agent-shell-markdown-image-width-ratio))
-            (let* ((beg (prop-match-beginning match))
-                   (ratio (get-text-property
-                           beg 'agent-shell-markdown-image-width-ratio)))
-              (when (or force
-                        (not (eql width (get-text-property
-                                         beg 'agent-shell-markdown-image-window-width))))
-                (agent-shell-markdown--resize-image
-                 beg (prop-match-end match)
-                 (if (numberp ratio)
-                     (round (* ratio width))
-                   (agent-shell-markdown--image-max-width))
-                 width))))))
-      (restore-buffer-modified-p modified))))
+    ;; The flag asks whether the check ran, not whether it changed
+    ;; anything: this scan answers it even when the buffer holds no
+    ;; tracked image at all.  A pass that signals does not answer it --
+    ;; the work did not happen, and on a buffer already settled at this
+    ;; width the flag is the only thing that would make the next pass
+    ;; run.  An undisplayed buffer never reaches here, so it keeps the
+    ;; flag too.
+    (prog1
+        ;; A re-size, not a content change: keep it off the undo list
+        ;; and don't flip the buffer's modified flag.
+        (let ((inhibit-read-only t)
+              (buffer-undo-list t)
+              (modified (buffer-modified-p)))
+          (save-excursion
+            (goto-char (point-min))
+            (let (match)
+              (while (setq match (text-property-search-forward
+                                  'agent-shell-markdown-image-width-ratio))
+                (let* ((beg (prop-match-beginning match))
+                       (ratio (get-text-property
+                               beg 'agent-shell-markdown-image-width-ratio)))
+                  (when (or force
+                            (not (eql width (get-text-property
+                                             beg 'agent-shell-markdown-image-window-width))))
+                    (agent-shell-markdown--resize-image
+                     beg (prop-match-end match)
+                     (if (numberp ratio)
+                         (round (* ratio width))
+                       (agent-shell-markdown--image-max-width))
+                     width))))))
+          (restore-buffer-modified-p modified))
+      (setq agent-shell-markdown--images-pending nil))))
 
 (defun agent-shell-markdown-image-scale-increase ()
   "Widen the image at point, or every image in the buffer, by one step.

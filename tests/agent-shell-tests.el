@@ -8750,6 +8750,295 @@ for the selected window's buffer instead."
       (kill-buffer shell-buffer)
       (kill-buffer other-buffer))))
 
+(ert-deftest agent-shell--realign-skips-rescan-when-settled ()
+  "A displayed buffer at its settled width rescans nothing.
+Ordinary streaming output schedules the re-align many times a second,
+and each pass walks every rendered table and image.  When the width
+has not changed and nothing new was rendered, there is nothing to
+re-do: the pass must not scan the buffer at all."
+  (with-temp-buffer
+    (let ((tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) (setq images (1+ images)))))
+        ;; First pass settles the buffer at 800.
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        (should (= images 1))
+        ;; Same width, nothing rendered since: no scan.
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        (should (= images 1))))))
+
+(ert-deftest agent-shell--realign-rescans-after-width-change ()
+  "A settled buffer that is resized must rescan both tables and images."
+  (with-temp-buffer
+    (let ((width 800)
+          (tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) width))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) (setq images (1+ images)))))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        (setq width 900)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell--realign-rescans-after-a-render ()
+  "A table rendered since the last pass must be picked up at the same width."
+  (with-temp-buffer
+    (let ((tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) (setq images (1+ images)))))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        ;; A render mid-stream can leave rows inconsistent even at the
+        ;; width already settled, so it must force a pass.
+        (setq agent-shell-markdown--tables-rendered (list (copy-marker (point))))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell--realign-rescans-after-an-image-render ()
+  "An image rendered since the last pass must be picked up at the same width."
+  (with-temp-buffer
+    (let ((tables 0)
+          (images 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) (setq images (1+ images)))))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= images 1))
+        (setq agent-shell-markdown--images-pending t)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= images 2))))))
+
+(ert-deftest agent-shell-viewport-initialize-forgets-settled-realign-width ()
+  "Test `agent-shell-viewport--initialize' forgets the settled width.
+
+The viewport shows the shell buffer's already-rendered text, so its
+tables carry the width they were laid out against wherever that
+happened.  Content swapped in place is not a window change, so if the
+settled width survived, a same-width re-align pass would skip and the
+copied table would stay misaligned."
+  (let ((shell-buffer (generate-new-buffer " *agent-shell shell*")))
+    (unwind-protect
+        (with-temp-buffer
+          (cl-letf (((symbol-function 'agent-shell-viewport--position)
+                     (lambda (&rest _) nil))
+                    ((symbol-function 'agent-shell-viewport--shell-buffer)
+                     (lambda (&rest _) shell-buffer))
+                    ((symbol-function 'agent-shell-viewport--update-header)
+                     #'ignore)
+                    ((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+            ;; Stubs must be in place before entering the mode: its
+            ;; header update reads the shell buffer.
+            (agent-shell-viewport-view-mode)
+            ;; As if this buffer had settled at some width already.
+            (setq agent-shell--realign-width 1200)
+            (agent-shell-viewport--initialize :prompt "p" :response "r")
+            (should (null agent-shell--realign-width))))
+      (kill-buffer shell-buffer))))
+
+(ert-deftest agent-shell--realign-settles-a-real-table-at-the-window-width ()
+  "End to end in a real window: a table laid out for another width is
+re-laid to this window's width once the buffer settles here.
+The other re-align tests stub the window and the rerender functions,
+which verifies the gate's decisions but not that a real table comes
+out right through it.  The recorded renders are cleared first, so the
+width comparison is the only thing that can make this pass scan."
+  ;; `make-frame' signals \"Unknown terminal type\" in `--batch'.
+  (skip-unless (display-graphic-p))
+  (let ((frame (make-frame '((visibility . nil)))))
+    (unwind-protect
+        (with-temp-buffer
+          (setq agent-shell--realign-width nil)
+          (insert "| h | i |\n|---|---|\n| 1 | 2 |\n")
+          (agent-shell-markdown-replace-markup)
+          (set-window-buffer (frame-selected-window frame) (current-buffer))
+          (let* ((window (frame-selected-window frame))
+                 (width (window-body-width window t))
+                 ;; A width this window does not have, derived so the
+                 ;; test can't collide with a window that happens to be
+                 ;; exactly the hard-coded value.
+                 (stale (if (> width 200) (- width 200) (+ width 200))))
+            (put-text-property (point-min) (point-max)
+                               'agent-shell-markdown-table-width stale)
+            ;; Only the width can force this pass to scan.
+            (setq agent-shell-markdown--tables-rendered nil
+                  agent-shell-markdown--images-pending nil)
+            (agent-shell--realign-rendered (current-buffer))
+            ;; The table now carries this window's width, so a later
+            ;; same-width pass settles and would skip.
+            (should (eql width (get-text-property
+                                (point-min) 'agent-shell-markdown-table-width)))
+            (should (eql width agent-shell--realign-width))))
+      (delete-frame frame))))
+
+(ert-deftest agent-shell--realign-rescans-after-content-replaced-in-place ()
+  "Replacing a settled buffer's content in place must force a scan.
+The viewport shows the shell buffer's already-rendered text, so its
+tables carry the width they were laid out against elsewhere.  Swapping
+that content is not a window change: the width the buffer settled at
+says nothing about the new content, so a same-width pass must still
+scan."
+  (with-temp-buffer
+    (let ((tables 0))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) nil)))
+        ;; Settle at 800.
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))
+        (should (eql agent-shell--realign-width 800))
+        ;; Content swapped in place, laid out against another width.
+        (insert (propertize "T" 'agent-shell-markdown-table-source "table"
+                            'agent-shell-markdown-table-width 400))
+        (agent-shell--forget-realign)
+        (should (null agent-shell--realign-width))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 2))))))
+
+(ert-deftest agent-shell--realign-rescans-after-redisplay-at-same-width ()
+  "A settled buffer whose window went away must rescan when shown again.
+The content may have been laid out elsewhere while the buffer was
+hidden, so the settled width alone cannot vouch for it.
+
+Drives `agent-shell--realign-rendered' directly instead of waiting on
+the idle timer: a real timer here would also realign whichever other
+buffers the rest of the suite happened to leave displayed, and count
+their passes.  The window is real, so the width the gate compares is
+the width a live display reports."
+  (skip-unless (display-graphic-p))
+  (let* ((frame (make-frame '((visibility . nil))))
+         (window (frame-selected-window frame))
+         (buffer (generate-new-buffer " *realign redisplay*"))
+         (other (generate-new-buffer " *realign redisplay other*"))
+         (tables 0))
+    (unwind-protect
+        (progn
+          (with-current-buffer buffer
+            (insert "| h | i |\n|---|---|\n| 1 | 2 |\n"))
+          (cl-letf (((symbol-function 'agent-shell-markdown-rerender-tables)
+                     (lambda (&rest _) (setq tables (1+ tables))))
+                    ((symbol-function 'agent-shell-markdown-rerender-images)
+                     (lambda (&rest _) nil)))
+            ;; Settle it in the window.
+            (set-window-buffer window buffer)
+            (agent-shell--realign-rendered buffer)
+            (should (= tables 1))
+            (should (eql (window-body-width window t)
+                         (buffer-local-value 'agent-shell--realign-width buffer)))
+            ;; Hide it.  The buffer's own hooks are buffer-local, so
+            ;; nothing runs for it now; a stale timer may still fire.
+            (set-window-buffer window other)
+            (agent-shell--realign-rendered buffer)
+            ;; Show it again at the very same width.
+            (set-window-buffer window buffer)
+            (agent-shell--realign-rendered buffer)
+            ;; Same width, but a re-display: must scan.
+            (should (eql (window-body-width window t)
+                         (buffer-local-value 'agent-shell--realign-width buffer)))
+            (should (= tables 2))))
+      (delete-frame frame)
+      (kill-buffer buffer)
+      (kill-buffer other))))
+
+(ert-deftest agent-shell--realign-undisplayed-buffer-settles-nothing ()
+  "A buffer shown nowhere has nothing to measure against, so it must
+not record a settled width: it has to rescan once shown."
+  (with-temp-buffer
+    (let ((displayed nil)
+          (tables 0))
+      (cl-letf (((symbol-function 'get-buffer-window)
+                 (lambda (&rest _) (and displayed 'window)))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown-rerender-tables)
+                 (lambda (&rest _) (setq tables (1+ tables))))
+                ((symbol-function 'agent-shell-markdown-rerender-images)
+                 (lambda (&rest _) nil)))
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 0))
+        (should (null agent-shell--realign-width))
+        (setq displayed t)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= tables 1))))))
+
+(ert-deftest agent-shell-markdown-rerender-images-keeps-pending-on-error ()
+  "A failed image re-size must leave the work pending for a retry.
+Clearing the flag on the error path would be wrong in the opposite
+direction: the scan did not do its job, so a later pass has to run
+again.  On a buffer that already settled at this width, the flag is
+the only signal left, and clearing it drops the re-layout for good."
+  (with-temp-buffer
+    (insert "X")
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-image-width-ratio 0.5)
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-image-window-width 400)
+    (setq agent-shell-markdown--images-pending t)
+    (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+              ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+              ((symbol-function 'agent-shell-markdown--resize-image)
+               (lambda (&rest _) (error "Test resize failure"))))
+      (should-error (agent-shell-markdown-rerender-images))
+      (should agent-shell-markdown--images-pending))))
+
+(ert-deftest agent-shell--realign-retries-images-after-a-failed-pass ()
+  "A transient re-size failure must not lose the re-layout for good.
+The buffer having settled at this width earlier is what makes this
+fragile: once the pending flag is cleared on the error path, the gate
+sees a settled width and nothing pending, and never scans again."
+  (with-temp-buffer
+    (insert "X")
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-image-width-ratio 0.5)
+    (put-text-property (point-min) (point-max)
+                       'agent-shell-markdown-image-window-width 400)
+    (let ((attempts 0)
+          (fail t))
+      (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) 'window))
+                ((symbol-function 'window-body-width) (lambda (&rest _) 800))
+                ((symbol-function 'agent-shell-markdown--resize-image)
+                 (lambda (start end _max-width width)
+                   (setq attempts (1+ attempts))
+                   (if fail
+                       (error "Test transient resize failure")
+                     (put-text-property
+                      start end 'agent-shell-markdown-image-window-width width)))))
+        ;; The buffer settled at this width on an earlier pass.
+        (setq agent-shell--realign-width 800)
+        ;; An image arrives and its first re-size fails.
+        (setq agent-shell-markdown--images-pending t)
+        (ignore-errors (agent-shell--realign-rendered (current-buffer)))
+        (should (= attempts 1))
+        ;; The failure clears; later streaming passes must recover.
+        (setq fail nil)
+        (agent-shell--realign-rendered (current-buffer))
+        (should (= attempts 2))
+        (should (eql 800 (get-text-property
+                          1 'agent-shell-markdown-image-window-width)))))))
+
 (ert-deftest agent-shell--make-permission-actions-orders-allow-before-reject ()
   "Offer allowing before rejecting, whatever order the agent sent.
 Regression: Claude Code sends `reject_once' first, which used to render
