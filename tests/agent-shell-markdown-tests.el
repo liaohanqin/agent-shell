@@ -2413,6 +2413,57 @@ raise SystemExit
 
 "))))
 
+(ert-deftest agent-shell-markdown-source-block-adjacent-blocks-no-blank-line ()
+  ;; Regression (#940): the first block's closing `:end' marker and the
+  ;; second block's opening `:start' marker share a position, so the
+  ;; first block's padding must not push the second block's opening
+  ;; fence into its body.
+  (let ((out (agent-shell-markdown-convert
+              "```sh\necho one\n```\n```sh\necho two\n```\n"))
+        (bodies '())
+        (pos 0))
+    (while (setq pos (text-property-not-all
+                      pos (length out)
+                      'agent-shell-markdown-source-block-body nil out))
+      (let ((end (or (next-single-property-change
+                      pos 'agent-shell-markdown-source-block-body out)
+                     (length out))))
+        (push (substring-no-properties out pos end) bodies)
+        (setq pos end)))
+    (should (equal (nreverse bodies) '("echo one" "echo two")))
+    (should-not (string-match-p "```" out))))
+
+(ert-deftest agent-shell-markdown-source-block-adjacent-blocks-framed-apart ()
+  ;; Panels rendered flush against each other gain the same untinted
+  ;; blank line as fences the agent separated, whether both blocks render
+  ;; in one pass or stream in across passes.
+  (let ((framed "
+sh ⧉
+
+echo one
+
+
+
+sh ⧉
+
+echo two
+
+"))
+    (should (equal (substring-no-properties
+                    (agent-shell-markdown-convert
+                     "```sh\necho one\n```\n```sh\necho two\n```\n"))
+                   framed))
+    (should (equal (substring-no-properties
+                    (agent-shell-markdown-convert
+                     "```sh\necho one\n```\n\n```sh\necho two\n```\n"))
+                   framed))
+    (with-temp-buffer
+      (dolist (chunk '("```sh\necho one\n```\n" "```sh\necho two\n```\n"))
+        (goto-char (point-max))
+        (insert chunk)
+        (agent-shell-markdown-replace-markup))
+      (should (equal (substring-no-properties (buffer-string)) framed)))))
+
 (ert-deftest agent-shell-markdown-source-block-body-protected-across-calls ()
   ;; Streaming: render a block, then append more markdown and re-render.
   ;; The previously-rendered body (`agent-shell-markdown-frozen t') must stay
@@ -2814,16 +2865,174 @@ Outro"))))
                            (agent-shell-markdown-replace-markup)
                            (substring-no-properties (buffer-string))))))))))
 
-(ert-deftest agent-shell-markdown-list-joins-bold-numbered-items ()
-  ;; Bold-prefixed points like `**1. X**' become ordered list items once
-  ;; the bold markup is stripped, so a blank line the author left between
-  ;; them is joined too, and sub-bullets written tight stay tight.
+(defun agent-shell-markdown-tests--render-all-ways (markdown)
+  "Return MARKDOWN rendered in one go and streamed in chunks of 1, 3 and 7.
+Each rendering is returned as a propertized string."
+  (cons (with-temp-buffer
+          (insert markdown)
+          (agent-shell-markdown-replace-markup :complete t)
+          (buffer-string))
+        (seq-map (lambda (chunk-size)
+                   (with-temp-buffer
+                     (let ((i 0))
+                       (while (< i (length markdown))
+                         (goto-char (point-max))
+                         (insert (substring markdown i
+                                            (min (length markdown) (+ i chunk-size))))
+                         (setq i (+ i chunk-size))
+                         (agent-shell-markdown-replace-markup)))
+                     (agent-shell-markdown-replace-markup :complete t)
+                     (buffer-string)))
+                 '(1 3 7))))
+
+(ert-deftest agent-shell-markdown-list-skips-rendered-markup ()
+  ;; A real list marker is still plain text when lists render.  One left
+  ;; behind by already rendered markup isn't a list item: it isn't tagged
+  ;; and the blank lines around it stay.
+  (dolist (case '(("## 1. Setup\n\nbody\n" "1. Setup\n\nbody\n")
+                  ("## 1. Setup" "1. Setup")
+                  ("**1. Create**\n\n**2. Accept**\n" "1. Create\n\n2. Accept\n")
+                  ("**1.** Create\n" "1. Create\n")
+                  ("`1. Create`\n" "1. Create\n")
+                  ("[1. Create](https://a.com)\n" "1. Create\n")
+                  ("1\\. Create\n\n2\\. Accept\n" "1. Create\n\n2. Accept\n")
+                  ("\\- Create\n" "- Create\n")))
+    (ert-info ((format "Markdown: %S" (car case)))
+      (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+        (should (equal (substring-no-properties rendered) (cadr case)))
+        (should-not (text-property-not-all
+                     0 (length rendered)
+                     'agent-shell-markdown-list-rendered nil rendered))))))
+
+(ert-deftest agent-shell-markdown-list-renders-items-holding-markup ()
+  ;; A plain marker makes a list item, whatever markup follows it.
+  (let ((agent-shell-markdown-list-bullets '("•")))
+    (dolist (case '(("1. **Create**\n2. `Accept`\n" "1. Create\n2. Accept\n")
+                    ("- **Create** now\n- `Accept` it\n" "• Create now\n• Accept it\n")
+                    ("- [ ] **Create**\n" "□ Create\n")
+                    ("1. **Create**" "1. Create")))
+      (ert-info ((format "Markdown: %S" (car case)))
+        (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+          (should (equal (substring-no-properties rendered) (cadr case)))
+          (should-not (text-property-not-all
+                       0 (length rendered)
+                       'agent-shell-markdown-list-rendered t rendered)))))))
+
+(ert-deftest agent-shell-markdown-list-ordered-item-streams-in-parts ()
+  ;; A rendered ordered item keeps its number as text, so it still matches
+  ;; the marker regexp while carrying the properties of rendered markup.
+  ;; It's a real item, so the rest of its line, arriving after a complete
+  ;; render, still joins it.
+  (with-temp-buffer
+    (insert "\n")
+    (goto-char (1- (point-max)))
+    (insert "1. one (")
+    (save-restriction (narrow-to-region (point-min) (1- (point-max)))
+                      (agent-shell-markdown-replace-markup :complete t))
+    (goto-char (1- (point-max)))
+    (insert "rest)\n2. two")
+    (save-restriction (narrow-to-region (point-min) (1- (point-max)))
+                      (agent-shell-markdown-replace-markup :complete t))
+    (goto-char (point-min))
+    (search-forward "rest")
+    (should (get-text-property (match-beginning 0)
+                               'agent-shell-markdown-list-rendered))
+    (should (get-text-property (match-beginning 0) 'line-prefix))))
+
+(ert-deftest agent-shell-markdown-list-skips-external-renderer-output ()
+  ;; A renderer's output is tagged frozen but needn't stash a source, and
+  ;; the tag stopping short of the newline keeps it from being avoided.
+  (let ((agent-shell-markdown-render-functions
+         (list (lambda (_context)
+                 (add-text-properties (point-min) (+ (point-min) 6)
+                                      '(agent-shell-markdown-frozen t))
+                 nil))))
+    (with-temp-buffer
+      (insert "1. Out\n")
+      (agent-shell-markdown-replace-markup)
+      (should-not (text-property-not-all
+                   (point-min) (point-max)
+                   'agent-shell-markdown-list-rendered nil)))))
+
+(ert-deftest agent-shell-markdown-list-frames-against-rendered-markup ()
+  ;; A rendered line below a list can't fold into it, so the list still
+  ;; gets its bottom gap.
+  (let ((agent-shell-markdown-list-bullets '("•")))
+    (dolist (case '(("- a\n## 1. Setup\nbody\n" "• a\n\n1. Setup\nbody\n")
+                    ("- a\n1\\. Setup\nbody\n" "• a\n\n1. Setup\nbody\n")))
+      (ert-info ((format "Markdown: %S" (car case)))
+        (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+          (should (equal (substring-no-properties rendered) (cadr case))))))))
+
+(ert-deftest agent-shell-markdown-list-blocks-end-at-untagged-line ()
+  ;; A line that isn't a list item ends the list above it, so it's framed
+  ;; the same whether the text arrives at once or streamed in chunks.
+  (let ((agent-shell-markdown-list-bullets '("•")))
+    (dolist (case '(("- a\nprose\n- b\n" "• a\n\nprose\n\n• b\n")
+                    ("- a\n## 1. Setup\n- b\n" "• a\n\n1. Setup\n\n• b\n")
+                    ("**1. First**\n- a\n**2. Second**\n- b\n"
+                     "1. First\n• a\n\n2. Second\n• b\n")))
+      (ert-info ((format "Markdown: %S" (car case)))
+        (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+          (should (equal (substring-no-properties rendered) (cadr case))))))))
+
+(ert-deftest agent-shell-markdown-list-keeps-bold-numbered-lines-apart ()
+  ;; Bold-prefixed points like `**1. X**' aren't list items, so the blank
+  ;; line the author left between them stays.  A list right under one hangs
+  ;; off it.
   (let ((agent-shell-markdown-list-bullets '("•")))
     (with-temp-buffer
       (insert "**1. First** point.\n\n**2. Second** point:\n- a\n- b\n")
       (agent-shell-markdown-replace-markup)
       (should (equal (substring-no-properties (buffer-string))
-                     "1. First point.\n2. Second point:\n• a\n• b\n")))))
+                     "1. First point.\n\n2. Second point:\n• a\n• b\n")))))
+
+(ert-deftest agent-shell-markdown-list-hangs-off-bold-numbered-line ()
+  ;; A list directly under a bold numbered step gets no top gap, so each
+  ;; step keeps its items.  Other lines above a list still frame it.
+  (let ((agent-shell-markdown-list-bullets '("•")))
+    (dolist (case '(("**1. First**\n- a\n- b\n\n**2. Second**\n- c\n- d\n"
+                     "1. First\n• a\n• b\n\n2. Second\n• c\n• d\n")
+                    ("__1. First__\n- a\n" "1. First\n• a\n")
+                    ("**1.** First:\n- a\n" "1. First:\n• a\n")
+                    ("**- First**\n- a\n" "- First\n• a\n")
+                    ("**1. First**\n\n- a\n" "1. First\n\n• a\n")
+                    ("**1. First**\n- a\nafter\n" "1. First\n• a\n\nafter\n")
+                    ("**Steps:**\n- a\n" "Steps:\n\n• a\n")
+                    ("## 1. Setup\n- a\n" "1. Setup\n\n• a\n")
+                    ("*1. First*\n- a\n" "1. First\n\n• a\n")
+                    ("`1. First`\n- a\n" "1. First\n\n• a\n")
+                    ("intro\n- a\n" "intro\n\n• a\n")))
+      (ert-info ((format "Markdown: %S" (car case)))
+        (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+          (should (equal (substring-no-properties rendered) (cadr case))))))))
+
+(ert-deftest agent-shell-markdown-list-frames-bold-numbered-lines-against-prose ()
+  ;; A run of bold numbered steps flush against prose gets a blank line
+  ;; above and below it, like a heading.  A list hanging off the last
+  ;; step stays attached.
+  (let ((agent-shell-markdown-list-bullets '("•")))
+    (dolist (case '(("Intro\n**1. First** point.\n**2. Second** point.\nafter\n"
+                     "Intro\n\n1. First point.\n2. Second point.\n\nafter\n")
+                    ("**1. First** point.\n**2. Second** point.\nafter\n"
+                     "1. First point.\n2. Second point.\n\nafter\n")
+                    ("Intro\n**1. First** point.\n**2. Second** point.\n\nafter\n"
+                     "Intro\n\n1. First point.\n2. Second point.\n\nafter\n")
+                    ("**1. First**\n**2. Second**\n- a\n"
+                     "1. First\n2. Second\n• a\n")
+                    ("**1. First**\n**2. Second**\n**3. Third**\n"
+                     "1. First\n2. Second\n3. Third\n")
+                    ("**1. Install**\nRun it.\n**2. Configure**\nEdit it.\n"
+                     "1. Install\n\nRun it.\n\n2. Configure\n\nEdit it.\n")
+                    ("Intro:\n**1. First**\n- a\n" "Intro:\n\n1. First\n• a\n")
+                    ("**1. First**\n- a\n**2. Second**\n- b\n"
+                     "1. First\n• a\n\n2. Second\n• b\n")
+                    ("Intro\n\n**1. First**\n" "Intro\n\n1. First\n")
+                    ("Intro\n**Steps:**\n" "Intro\nSteps:\n")
+                    ("Intro\n## 1. Setup\n" "Intro\n1. Setup\n")))
+      (ert-info ((format "Markdown: %S" (car case)))
+        (dolist (rendered (agent-shell-markdown-tests--render-all-ways (car case)))
+          (should (equal (substring-no-properties rendered) (cadr case))))))))
 
 (ert-deftest agent-shell-markdown-list-keeps-blank-bordering-prose ()
   ;; A blank with a list item on only one side frames the list off from

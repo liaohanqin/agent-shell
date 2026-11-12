@@ -4,10 +4,10 @@
 
 ;; Author: Alvaro Ramirez https://xenodium.com
 ;; URL: https://github.com/xenodium/agent-shell
-;; Version: 0.93.3
+;; Version: 0.95.1
 ;; Package-Requires: ((emacs "29.1") (shell-maker "0.98.2") (acp "0.17.1"))
 
-(defconst agent-shell--version "0.93.3")
+(defconst agent-shell--version "0.95.1")
 
 ;; Minimum dependency versions, as declared in the `Package-Requires'
 ;; header above.  Package managers that resolve versions enforce the
@@ -621,10 +621,12 @@ letting the trailing timer fire afterwards would redo settled work."
                     (save-excursion
                       (goto-char (point-max))
                       (beginning-of-line)
-                      (and (looking-at-p
+                      (and (looking-at
                             agent-shell-markdown--list-item-last-line-regexp)
                            (not (get-text-property
-                                 (point) 'agent-shell-markdown-list-rendered))))
+                                 (point) 'agent-shell-markdown-list-rendered))
+                           (not (agent-shell-markdown--rendered-list-marker-p
+                                 (match-beginning 2) (match-end 2)))))
                     ;; A blockquote line or header whose newline never
                     ;; arrived.  A rendered header has lost its `#'s.
                     (save-excursion
@@ -1179,6 +1181,22 @@ context is shown rather than nothing."
                  (const :tag "Full replay" full))
   :group 'agent-shell)
 
+(defcustom agent-shell-session-fork-restore-history nil
+  "Whether to restore history when forking a session.
+
+When non-nil, load the forked session via `session/load' so its
+history is shown as `agent-shell-session-restore-verbosity'
+dictates.  Only applies when that verbosity results in
+`session/load'.
+
+When nil, forking sends `session/fork' alone and the new shell
+starts without history.
+
+Requires agents to support loading a session right after forking
+it (e.g. claude-agent-acp 0.90.0 or newer)."
+  :type 'boolean
+  :group 'agent-shell)
+
 (defvar agent-shell-session-restore-strategy nil
   "Obsolete.  Use `agent-shell-session-restore-verbosity' instead.
 
@@ -1639,6 +1657,10 @@ With \\[universal-argument] prefix ARG, submit through
 `agent-shell-busy-submit-override-function' instead, which steers by
 default.  \\[agent-shell-submit-override] is bound to the same thing.
 
+With ARG at an empty prompt mid-turn, call
+`agent-shell-busy-submit-reroute-function' instead, which by default
+offers to steer the most recently queued prompt.
+
 This owns the `agent-shell-submit' name because shell-maker's
 per-start aliasing is disabled (see the `:alias-commands nil' call in
 `agent-shell--start')."
@@ -1649,9 +1671,12 @@ per-start aliasing is disabled (see the `:alias-commands nil' call in
               (eq agent-shell-session-strategy 'new-deferred))
     (user-error "Starting agent, please wait"))
   (if (shell-maker-busy)
-      (when-let* ((prompt (agent-shell--prompt-input)))
-        (agent-shell--busy-submit :prompt prompt :override arg)
-        (agent-shell--clear-prompt-input))
+      (if-let* ((prompt (agent-shell--prompt-input)))
+          (progn
+            (agent-shell--busy-submit :prompt prompt :override arg)
+            (agent-shell--clear-prompt-input))
+        (when (and arg agent-shell-busy-submit-reroute-function)
+          (funcall agent-shell-busy-submit-reroute-function)))
     (shell-maker-submit)))
 
 (defun agent-shell-submit-override ()
@@ -1662,7 +1687,11 @@ Submits through `agent-shell-busy-submit-override-function' rather than
 steering is not the default is one keystroke away.
 
 Only differs from \\[agent-shell-submit] while the agent is working:
-with no turn to queue behind or steer into, both simply submit."
+with no turn to queue behind or steer into, both simply submit.
+
+At an empty prompt mid-turn, calls
+`agent-shell-busy-submit-reroute-function' instead, so a prompt queued
+by mistake can still be sent another way (steered by default)."
   (declare (modes agent-shell-mode))
   (interactive)
   (agent-shell-submit '(4)))
@@ -3403,20 +3432,20 @@ lowercase; the assembled summary capitalizes its first word.  See URL
     (:singular . "tool call") (:plural . "tool calls"))
   "Phrasing for kinds absent from `agent-shell--tool-call-kind-phrases'.")
 
-(cl-defun agent-shell--tool-call-kind-phrase (&key kind count pending)
+(cl-defun agent-shell--tool-call-kind-phrase (&key kind count unfinished)
   "Return a lowercase phrase for KIND repeated COUNT times.
-When PENDING is non-nil the present-tense verb is used, so a not-yet-run
-action reads \"run a command\" rather than \"ran a command\".  Callers
-capitalize as needed.
+When UNFINISHED is non-nil the present-tense verb is used, so an
+action still under way reads \"run a command\" rather than \"ran a
+command\".  Callers capitalize as needed.
 
   (agent-shell--tool-call-kind-phrase :kind \"execute\" :count 2)
   ;; => \"ran 2 commands\"
-  (agent-shell--tool-call-kind-phrase :kind \"execute\" :count 1 :pending t)
+  (agent-shell--tool-call-kind-phrase :kind \"execute\" :count 1 :unfinished t)
   ;; => \"run a command\""
   (let ((phrase (or (assoc-default kind agent-shell--tool-call-kind-phrases)
                     agent-shell--tool-call-kind-phrase-default)))
     (format "%s %s %s"
-            (map-elt phrase (if pending :present :past))
+            (map-elt phrase (if unfinished :present :past))
             (if (= count 1) "a" (number-to-string count))
             (map-elt phrase (if (= count 1) :singular :plural)))))
 
@@ -3480,16 +3509,19 @@ Thoughts are not counted."
           (seq-map
            (lambda (kind)
              (let* ((of-kind (seq-filter (lambda (member)
-                                          (equal (funcall member-kind member) kind))
-                                        tool-members))
-                    (pending (seq-some (lambda (member)
-                                         (let ((tool-call (cdr member)))
-                                           (and (or (member (map-elt tool-call :status)
-                                                            '("pending" "in_progress" "running"))
-                                                    (and (map-elt tool-call :subagent)
-                                                         (null (map-elt tool-call :status))))
-                                                (not (map-elt tool-call :end-time)))))
-                                       of-kind))
+                                           (equal (funcall member-kind member) kind))
+                                         tool-members))
+                    ;; develop 侧 richer check: CodeBuddy can leave a subagent
+                    ;; `pending' for its whole run, so `running' and a missing
+                    ;; status with no `:end-time' also count as unfinished.
+                    (unfinished (seq-some (lambda (member)
+                                            (let ((tool-call (cdr member)))
+                                              (and (or (member (map-elt tool-call :status)
+                                                               '("pending" "in_progress" "running"))
+                                                       (and (map-elt tool-call :subagent)
+                                                            (null (map-elt tool-call :status))))
+                                                   (not (map-elt tool-call :end-time)))))
+                                          of-kind))
                     (paths (when (member kind '("read" "edit" "delete"))
                              (seq-map (lambda (member)
                                         (agent-shell--tool-call-file-paths (cdr member)))
@@ -3499,7 +3531,7 @@ Thoughts are not counted."
                 :count (if (and paths (not (memq nil paths)))
                            (length (seq-uniq (apply #'append paths)))
                          (length of-kind))
-                :pending pending)))
+                :unfinished unfinished)))
            (seq-uniq (seq-map member-kind tool-members))))
          (summary (string-join (if thought (cons "thought" tool-phrases) tool-phrases)
                                ", ")))
@@ -5033,6 +5065,33 @@ duration it reached."
               ;; visible once turn end folds the group.
               (agent-shell--refresh-subagent-label state tool-call-id)))
           (map-elt state :tool-calls)))
+
+(cl-defun agent-shell--unfinished-tool-calls (&key tool-calls)
+  "Return TOOL-CALLS whose activity group still has an unfinished member.
+
+A turn can end with tool calls still running (subagents carry on past
+it), and their tool_call_update notifications arrive out of turn.  Keep
+those calls, so an update still finds the title and kind it was rendered
+with, along with their group siblings, so the group header still counts
+every member.  Everything else is no longer needed.
+
+  (agent-shell--unfinished-tool-calls
+   :tool-calls \\='((\"t1\" . ((:group-id . \"g1\") (:status . \"completed\")))
+                 (\"t2\" . ((:group-id . \"g2\") (:status . \"completed\")))
+                 (\"t3\" . ((:group-id . \"g2\") (:status . \"pending\")))))
+  ;; => ((\"t2\" . ((:group-id . \"g2\") (:status . \"completed\")))
+  ;;     (\"t3\" . ((:group-id . \"g2\") (:status . \"pending\"))))"
+  (let ((unfinished (seq-filter (lambda (pair)
+                                  (member (map-elt (cdr pair) :status)
+                                          '("pending" "in_progress")))
+                                tool-calls)))
+    (seq-filter (lambda (pair)
+                  (or (memq pair unfinished)
+                      (when-let* ((group-id (map-elt (cdr pair) :group-id)))
+                        (seq-find (lambda (other)
+                                    (equal (map-elt (cdr other) :group-id) group-id))
+                                  unfinished))))
+                tool-calls)))
 
 (cl-defun agent-shell--make-boxed-message (&key text width)
   "Return TEXT framed in a rounded Unicode box.
@@ -9137,13 +9196,10 @@ listing sessions to pick one to load."
                                         (propertize "Forked session" 'font-lock-face 'agent-shell-section-heading))
                     :expanded t
                     :body (or new-session-id ""))
-                   ;; Some agents (e.g. claude-agent-acp) fork by copying the
-                   ;; transcript only, returning neither models nor modes and
-                   ;; leaving the new session inactive (prompts fail with
-                   ;; "Session not found").  Resuming activates it and also
-                   ;; replays the forked history when loading.
-                   (if (or (map-elt (agent-shell--state) :supports-session-load)
-                           (map-elt (agent-shell--state) :supports-session-resume))
+                   ;; The fork is already active, so only load it when that
+                   ;; replays history.  Resuming would add nothing.
+                   (if (and agent-shell-session-fork-restore-history
+                            (agent-shell--use-session-load-p (agent-shell--state)))
                        (agent-shell--initiate-session-resume-by-id
                         :session-id new-session-id
                         :shell-buffer shell-buffer
@@ -9151,7 +9207,7 @@ listing sessions to pick one to load."
                         ;; The fork itself succeeded, so stay on it rather
                         ;; than falling back to picking another session.
                         :on-failure (lambda ()
-                                      (let ((text "Couldn't load forked session. Prompts may fail."))
+                                      (let ((text "Couldn't restore forked session history."))
                                         (message "%s" text)
                                         (agent-shell--update-bootstrapping-fragment
                                          :state (agent-shell--state)
@@ -9944,10 +10000,15 @@ reads the buffer's prompt capabilities."
                     :last-entry-type (map-elt (agent-shell--state) :last-entry-type)
                     :file-path agent-shell--transcript-file)
                    ;; Tool call details are no longer needed after
-                   ;; a session prompt request is finished.
+                   ;; a session prompt request is finished, unless
+                   ;; their updates are still arriving out of turn.
                    ;; Avoid accumulating them unnecessarily.
                    (agent-shell--freeze-subagents (agent-shell--state))
                    (map-put! (agent-shell--state) :tool-calls nil)
+
+                   (map-put! (agent-shell--state) :tool-calls
+                             (agent-shell--unfinished-tool-calls
+                              :tool-calls (map-elt (agent-shell--state) :tool-calls)))
                    (agent-shell-elicitation--clear :state (agent-shell--state))
                    ;; The turn is over, so nothing is active any more: fold
                    ;; the last activity group `latest' left expanded.
@@ -10026,6 +10087,12 @@ Continue?" (agent-shell--prompt-queue-summary)))
                    ;; An interrupted turn may not report a final status, so
                    ;; freeze running subagents before folding their cards.
                    (agent-shell--freeze-subagents agent-shell--state)
+                   ;; The turn is over, so tidy up its tool calls and
+                   ;; forms just as a successful turn does.
+                   (map-put! agent-shell--state :tool-calls
+                             (agent-shell--unfinished-tool-calls
+                              :tool-calls (map-elt agent-shell--state :tool-calls)))
+                   (agent-shell-elicitation--clear :state agent-shell--state)
                    ;; An interrupted turn leaves no group active either.
                    (agent-shell--collapse-expanded-activity-group agent-shell--state)
                    ;; Display pending requests on failure.
@@ -10820,7 +10887,7 @@ MESSAGE-TEXT: Optional message to display after sending the response."
     (agent-shell--delete-fragment :state state :block-id (format "permission-%s" tool-call-id))
     ;; Note: Tool call data is no longer deleted here intentionally.
     ;; Subsequent tool_call_update notifications still need the data.
-    ;; It gets cleared at end of turn with all tool calls.
+    ;; It gets cleared at end of turn once its group finishes.
     ;;
     ;; Do clear :permission-request-id so consumers can distinguish
     ;; between a pending permission request and one already answered.
