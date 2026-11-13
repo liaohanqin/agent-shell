@@ -443,6 +443,15 @@ block is left as literal text."
           (avoid-ranges))
       (save-restriction
         (narrow-to-region watermark (point-max))
+        ;; Text styled by an earlier render may have lost its `face' to
+        ;; re-fontification since.  Passes that layer a face onto a whole
+        ;; line once its newline arrives (blockquotes, headers) would
+        ;; otherwise build on the bare text, and the mirror below would
+        ;; then overwrite the surviving `font-lock-face', dropping e.g.
+        ;; the bold in "> a **b** c".
+        (with-silent-modifications
+          (agent-shell-markdown--restore-face-from-font-lock-face
+           (point-min) (point-max)))
         ;; Build the render context (fenced-block descriptors + inline
         ;; `code' ranges) once, via the same function any external code
         ;; renders a static region through, so the two cannot drift.
@@ -778,6 +787,19 @@ while ?a and ?中 are nil."
      ((memq category '(Pc Pd Pe Pf Pi Po Ps Sc Sk Sm So))
       :punct))))
 
+(defun agent-shell-markdown--cjk-char-p (char)
+  "Return non-nil when CHAR is a CJK character, as markdown-cjk-friendly uses it.
+The spec counts wide East Asian characters (emoji aside) and Hangul.
+Emacs has no East Asian Width property, so the script stands in for it:
+Han, Kana, Hangul, Bopomofo, Yi, and CJK punctuation and fullwidth
+forms (`cjk-misc').  A nil CHAR (a buffer edge) is not CJK.
+
+For example ?中, ?あ, ?라, ?「 and ?（ are CJK, while ?a, ?\\( and ?Я
+are not."
+  (and char
+       (memq (aref char-script-table char)
+             '(han kana hangul bopomofo yi cjk-misc))))
+
 (cl-defun agent-shell-markdown--emphasis-delimiter-p (&key position length opening)
   "Return non-nil if the delimiter at POSITION can open or close emphasis.
 LENGTH is the delimiter's char count (2 for `**').  OPENING non-nil
@@ -785,15 +807,24 @@ checks an opener; nil checks a closer.  Follows the CommonMark
 left/right-flanking rules, where `_' additionally may not open or
 close inside a word.
 
+Flanking is relaxed as in markdown-cjk-friendly: a CJK character on
+either side (see `agent-shell-markdown--cjk-char-p') lets punctuation
+sit against the delimiter, so CJK text needs no space around it.
+
 For example, both star pairs in \"中**bold**文\" and \"中*it*文\"
-qualify, while neither underscore pair in \"a__b__c\" does."
-  (let* ((before (agent-shell-markdown--flanking-kind (char-before position)))
-         (after (agent-shell-markdown--flanking-kind
-                 (char-after (+ position length))))
+qualify, as does the pair in \"**가중치(Weights)**라고\", which
+CommonMark leaves literal.  Neither underscore pair in \"a__b__c\"
+does."
+  (let* ((before-char (char-before position))
+         (after-char (char-after (+ position length)))
+         (before (agent-shell-markdown--flanking-kind before-char))
+         (after (agent-shell-markdown--flanking-kind after-char))
+         (cjk (or (agent-shell-markdown--cjk-char-p before-char)
+                  (agent-shell-markdown--cjk-char-p after-char)))
          (left (and (not (eq after :space))
-                    (or (not (eq after :punct)) before)))
+                    (or (not (eq after :punct)) before cjk)))
          (right (and (not (eq before :space))
-                     (or (not (eq before :punct)) after))))
+                     (or (not (eq before :punct)) after cjk))))
     (if opening
         (and left (or (not (eq (char-after position) ?_))
                       (not right) (eq before :punct)))
@@ -974,48 +1005,44 @@ when no more text will be appended, so a header ending the buffer
 renders too.
 
 For example, the buffer \"## My title\\n\" becomes \"My title\\n\"
-with face `agent-shell-markdown-header-2' on \"My title\"."
+with face `agent-shell-markdown-header-2' on \"My title\".  Inside a
+blockquote, \"> ## My title\\n\" becomes \"> My title\\n\", its `>'
+left for `agent-shell-markdown--style-blockquotes' to draw as a bar."
   (let ((case-fold-search nil))
     (goto-char (point-min))
     (while (re-search-forward
-            (rx bol (zero-or-more blank) (group (one-or-more "#"))
+            (rx bol
+                (group (zero-or-more (regexp agent-shell-markdown--blockquote-marker-regexp)))
+                (zero-or-more blank) (group (one-or-more "#"))
                 (one-or-more blank)
                 (group (one-or-more (not (any "\n"))))
                 (group (regexp (if complete (rx (or "\n" eos)) "\n"))))
             nil t)
-      (let* ((markup-start (match-beginning 0))
+      (let* ((markup-start (match-end 1))
              (markup-end (match-end 0))
              (avoid (agent-shell-markdown-in-avoid-range-p
                      markup-start markup-end avoid-ranges)))
         (if avoid
             (goto-char (cdr avoid))
-          (let* ((level (- (match-end 1) (match-beginning 1)))
-                 (text (buffer-substring (match-beginning 2) (match-end 2)))
-                 (source (unless (get-text-property markup-start
-                                                    'agent-shell-markdown-source)
-                           (agent-shell-markdown-reconstruct
-                            markup-start (match-end 2))))
-                 ;; `text' keeps the title's own properties.  Carry the newline
-                 ;; separately so its trailing-whitespace invisibility does not
-                 ;; hide the title.
-                 (terminator (match-string-no-properties 3))
-                 (newline-properties
-                  (unless (string-empty-p terminator)
-                    (agent-shell-markdown--carry-properties (1- markup-end)))))
-            (delete-region markup-start markup-end)
-            (goto-char markup-start)
-            (insert text)
-            (let ((end (point)))
-              (insert terminator)
-              (when newline-properties
-                (add-text-properties end (point) newline-properties))
-              (add-face-text-property
-               markup-start end
-               (intern (format "agent-shell-markdown-header-%d"
-                               (min (max level 1) 6))))
-              (when source
-                (put-text-property markup-start end
-                                   'agent-shell-markdown-source source)))))))))
+          (let ((level (- (match-end 2) (match-beginning 2)))
+                (title-end (copy-marker (match-end 3)))
+                (source (unless (get-text-property markup-start
+                                                   'agent-shell-markdown-source)
+                          (agent-shell-markdown-reconstruct
+                           markup-start (match-end 3)))))
+            ;; Delete just the `#' prefix, leaving the title and its
+            ;; newline in place.  Rewriting the whole line would drag a
+            ;; marker at the next line's start (a fenced block's, say)
+            ;; back onto the title.
+            (delete-region markup-start (match-beginning 3))
+            (add-face-text-property
+             markup-start title-end
+             (intern (format "agent-shell-markdown-header-%d"
+                             (min (max level 1) 6))))
+            (when source
+              (put-text-property markup-start title-end
+                                 'agent-shell-markdown-source source))
+            (set-marker title-end nil)))))))
 
 (cl-defun agent-shell-markdown--style-inline-code (&key avoid-ranges)
   "Strip backticks from complete inline `X` spans and face the body.
@@ -1713,17 +1740,23 @@ property that draws an underlined rule across the window, plus a
 it.  Dividers inside any of AVOID-RANGES are left untouched.
 
 The chars themselves remain in the buffer beneath the display
-property, so the source markdown round-trips through copy/save."
+property, so the source markdown round-trips through copy/save.
+
+Inside a blockquote, the rule starts after the `>' markers, which
+`agent-shell-markdown--style-blockquotes' draws as bars.  For
+example, in \"> ---\" only \"---\" is displayed as the rule."
   (let ((case-fold-search nil))
     (goto-char (point-min))
     (while (re-search-forward
-            (rx bol (zero-or-more blank)
+            (rx bol
+                (group (zero-or-more (regexp agent-shell-markdown--blockquote-marker-regexp)))
+                (zero-or-more blank)
                 (or (seq "***" (zero-or-more "*"))
                     (seq "---" (zero-or-more "-"))
                     (seq "___" (zero-or-more "_")))
                 (zero-or-more blank) eol)
             nil t)
-      (let* ((rule-start (match-beginning 0))
+      (let* ((rule-start (match-end 1))
              (rule-end (match-end 0))
              (avoid (agent-shell-markdown-in-avoid-range-p
                      rule-start rule-end avoid-ranges)))
@@ -1747,6 +1780,50 @@ Like the line `agent-shell-markdown--style-blockquotes' matches, but
 ending at `eos' instead of a trailing `\\n'.  Used to find a blockquote
 line ending text that is complete, so no newline is coming for it.")
 
+(defconst agent-shell-markdown--blockquote-marker-regexp
+  (rx (** 0 3 " ") ">" (opt " "))
+  "Regexp matching one blockquote marker.
+As in CommonMark: up to three spaces, `>', then an optional space.")
+
+(defun agent-shell-markdown--blockquote-markers-regexp (depth)
+  "Return a regexp matching DEPTH blockquote markers at a line start.
+
+For example, with DEPTH 2 the regexp matches the \"> > \" opening
+\"> > ls\", and \">>\" opening \">>ls\", but nothing in \"> ls\"."
+  (rx-to-string `(seq bol (= ,depth (regexp ,agent-shell-markdown--blockquote-marker-regexp)))
+                t))
+
+(defun agent-shell-markdown--strip-blockquote-markers (text depth)
+  "Return TEXT with DEPTH blockquote markers removed from each line.
+Lines carrying fewer markers are left alone.
+
+For example, (agent-shell-markdown--strip-blockquote-markers \"> a\\n> b\" 1)
+returns \"a\\nb\"."
+  (if (zerop depth)
+      text
+    (replace-regexp-in-string (agent-shell-markdown--blockquote-markers-regexp depth)
+                              "" text t t)))
+
+(cl-defun agent-shell-markdown--delete-blockquote-markers (&key start end depth)
+  "Delete DEPTH blockquote markers from each line between START and END.
+The buffer counterpart of `agent-shell-markdown--strip-blockquote-markers'.
+
+For example, with DEPTH 1 a region holding \"> x = 1\\n>     y = 2\"
+becomes \"x = 1\\n    y = 2\"."
+  (unless (zerop depth)
+    (save-excursion
+      (goto-char start)
+      (while (< (point) end)
+        (when (looking-at (agent-shell-markdown--blockquote-markers-regexp depth))
+          (delete-region (match-beginning 0) (match-end 0)))
+        (forward-line 1)))))
+
+(defun agent-shell-markdown--blockquote-bars (depth)
+  "Return DEPTH blockquote bars, drawn as `--style-blockquotes' draws them.
+For example, 2 returns \"▌ ▌ \" in face `agent-shell-markdown-blockquote'."
+  (propertize (apply #'concat (make-list depth "▌ "))
+              'face 'agent-shell-markdown-blockquote))
+
 (cl-defun agent-shell-markdown--style-blockquotes (&key avoid-ranges complete)
   "Render `>'-prefixed lines as blockquotes with vertical bars.
 
@@ -1754,9 +1831,13 @@ Each leading `>' character on the line is shown as `▌' via a
 `display' text property; the underlying `>' chars stay in the
 buffer so the source markdown round-trips through copy/save and
 re-rendering remains idempotent.  Remaining content on the line
-gets face `agent-shell-markdown-blockquote' (composes with any
-face already applied by an earlier pass — bold/italic/inline-code
-inside a blockquote still render).
+gets face `agent-shell-markdown-blockquote', layered beneath any face
+an earlier pass applied.  Bold, italic or inline code inside a
+blockquote keeps its own weight, slant and colour, even when the
+blockquote face sets them (e.g. a theme's `font-lock-comment-face'
+with a regular weight).  For example, \"> hello **world**\" gives
+\"world\" the faces (agent-shell-markdown-bold
+agent-shell-markdown-blockquote).
 
 Multiple nesting levels are supported: each leading `>' renders
 as its own bar, so `>> text' shows two bars and `>>> text' three.
@@ -1796,7 +1877,8 @@ left untouched."
                                   (if (eq (char-before line-end) ?\n)
                                       (1- line-end)
                                     line-end)
-                                  'agent-shell-markdown-blockquote)
+                                  'agent-shell-markdown-blockquote
+                                  t)
           (add-text-properties line-start line-end
                                '(agent-shell-markdown-frozen t
                                                              rear-nonsticky (agent-shell-markdown-frozen))))))))
@@ -1873,179 +1955,197 @@ with `emacs-lisp-mode' face properties on the body and a
                 ;; Honor `agent-shell-markdown-frozen'.
                 ((not (get-text-property open-start 'agent-shell-markdown-frozen)))
                 ((not (get-text-property open-end 'agent-shell-markdown-frozen))))
-      (let* ((lang (map-elt block :language))
-             (body-start (copy-marker open-end))
-             (body-end (copy-marker (1- close-start)))
-             (source (buffer-substring-no-properties open-start close-end))
-             (highlighted (when highlight-blocks
-                            (agent-shell-markdown--highlight-code
-                             (buffer-substring-no-properties body-start body-end)
-                             lang))))
-        ;; Delete in reverse position order so earlier offsets stay
-        ;; valid; body markers adjust automatically.
-        (delete-region close-start close-end)
-        (delete-region open-start open-end)
-        ;; Seed the bg panel on body chars first, then layer language
-        ;; font-lock faces on top — the foreground colors take priority
-        ;; per glyph while the `:extend t' background fills the gaps
-        ;; and reaches the right edge of the window.  Include the
-        ;; trailing `\\n' (the one that sat between body and close
-        ;; fence, preserved by the deletes above): `:extend t' only
-        ;; extends the background when the face is in effect at
-        ;; end-of-line, so without the `\\n' carrying the face the
-        ;; last body line's bg would stop at the last content char.
-        (let ((body-bg-end (min (1+ (marker-position body-end))
-                                (point-max)))
-              ;; `line-prefix' / `wrap-prefix' visually inset each
-              ;; rendered line: 2 plain cols then 2 bg-tinted cols.
-              ;; Copying chars out of the block yanks raw source with
-              ;; no leading indentation.  `wrap-prefix' handles long
-              ;; lines that wrap.  Splitting the prefix this way keeps
-              ;; the panel from running hard to the window's left edge
-              ;; while still drawing a clear tinted gutter.
-              (prefix (concat "  "
-                              (propertize
-                               "  " 'face
-                               'agent-shell-markdown-source-block))))
-          (put-text-property (marker-position body-start) body-bg-end
-                             'face 'agent-shell-markdown-source-block)
-          (agent-shell-markdown--apply-faces-from highlighted
-                                                  (marker-position body-start))
-          (add-text-properties (marker-position body-start) body-bg-end
-                               `(agent-shell-markdown-frozen t
-                                                             agent-shell-non-trimmable t
-                                                             rear-nonsticky (agent-shell-markdown-frozen
-                                                                             agent-shell-non-trimmable)
-                                                             line-prefix ,prefix
-                                                             wrap-prefix ,prefix))
-          ;; Insert an actionable "LANG ⧉" / "snippet ⧉" label and the
-          ;; surrounding panel padding as REAL BUFFER TEXT — no
-          ;; `display' properties (which previously caused the body's
-          ;; first char to be hidden / clipped, see #597 "Make code
-          ;; block label actual buffer text"), no overlays.  Layout
-          ;; relative to the original body: `<vpad>\\n<label>\\n\\n
-          ;; <body>\\n<vpad>\\n', where each padding `\\n' carries the
-          ;; panel bg face so its line renders as a tinted blank line.
-          ;; RET or mouse-1 on the label kills the body to the kill
-          ;; ring.  `content-start' uses insertion-type t so it stays
-          ;; AFTER the inserted prefix, giving the kill-action a
-          ;; stable pointer to body content even though `body-start'
-          ;; itself collapses to the leading vpad's first char.
-          ;; After insertion we carry the body's caller-set properties
-          ;; (`invisible', agent-shell-ui block/section markers,
-          ;; `read-only', etc.) onto the inserted chars — propertize'd
-          ;; inserts ignore stickiness, and without this the inserted
-          ;; prefix punches a hole in the caller's contiguous block
-          ;; range and breaks toggle/replace operations.
-          (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
-                                     " "
-                                     ;; Tag the copy glyph so item
-                                     ;; navigation can land on the
-                                     ;; affordance itself (see
-                                     ;; `agent-shell-markdown--next-visible-source-block').
-                                     (propertize
-                                      "⧉"
-                                      'agent-shell-markdown-source-block-copy t)))
-                 (content-start (copy-marker (marker-position body-start) t))
-                 (kill-action (lambda ()
-                                (interactive)
-                                ;; Locate the body by text property in
-                                ;; the current buffer so copy works in
-                                ;; any buffer that received a propertized
-                                ;; copy of the rendered block (e.g. the
-                                ;; viewport).
-                                (when-let* ((start (next-single-property-change
-                                                    (point)
-                                                    'agent-shell-markdown-source-block-body))
-                                            ((get-text-property
-                                              start
-                                              'agent-shell-markdown-source-block-body))
-                                            (end (next-single-property-change
-                                                  start
-                                                  'agent-shell-markdown-source-block-body)))
-                                  (kill-new (buffer-substring-no-properties start end))
-                                  (message "Copied"))))
-                 (label-map (agent-shell-markdown--make-ret-binding-map
-                             kill-action))
-                 (vpad-line (propertize "\n"
-                                        'face 'agent-shell-markdown-source-block
-                                        'line-prefix prefix
-                                        'wrap-prefix prefix
-                                        'agent-shell-non-trimmable t
-                                        'rear-nonsticky
-                                        '(agent-shell-non-trimmable)))
-                 (label (propertize
-                         label-text
-                         'face 'agent-shell-markdown-source-block-language
-                         'pointer 'hand
-                         'keymap label-map
-                         'cursor-sensor-functions
-                         (agent-shell-markdown--make-hint-sensor
-                          (lambda ()
-                            (agent-shell-markdown--action-hint
-                             :action kill-action
-                             :keymap label-map
-                             :verb "copy")))
-                         'agent-shell-markdown-frozen t
-                         ;; `cursor-sensor-functions' included so the
-                         ;; hint stops at the label rather than showing
-                         ;; on the character after it.
-                         'rear-nonsticky '(agent-shell-markdown-frozen
-                                           cursor-sensor-functions)
-                         'line-prefix prefix
-                         'wrap-prefix prefix))
-                 ;; Top vpad `\\n' + label + middle vpad `\\n' + a
-                 ;; second `\\n' that becomes the first column of the
-                 ;; line carrying body content.
-                 (header (concat vpad-line label vpad-line vpad-line))
-                 (carried (agent-shell-markdown--carry-properties body-start)))
-            (goto-char body-start)
-            (insert header)
-            (when carried
-              (add-text-properties (marker-position body-start)
-                                   (marker-position content-start)
-                                   carried))
-            ;; Tag body content so the label's copy action can locate
-            ;; it by text property, survives a propertized copy into
-            ;; another buffer (e.g. viewport).
-            (put-text-property (marker-position content-start)
-                               (marker-position body-end)
-                               'agent-shell-markdown-source-block-body t)
-            ;; Bottom vpad: insert a single tinted `\\n' AFTER the
-            ;; body's trailing newline so the panel ends on a blank
-            ;; tinted line below the last body line.  body-end
-            ;; (insertion-type nil) stays put across this insert; the
-            ;; vpad lives at [body-end, body-end+1) within the buffer.
-            (let ((panel-bottom (marker-position body-end)))
-              (save-excursion
-                (when (and (< (marker-position body-end) (point-max))
-                           (eq (char-after (marker-position body-end)) ?\n))
-                  (goto-char (1+ (marker-position body-end)))
-                  (let ((vpad-start (point)))
-                    (insert vpad-line)
-                    (when carried
-                      (add-text-properties vpad-start (point) carried))
-                    (setq panel-bottom (point)))))
-              ;; The inserted panel chrome (language label, copy icon,
-              ;; padding) is not markdown, so give it an empty source: a
-              ;; selection that contains it reconstructs to nothing
-              ;; rather than leaking e.g. "python ⧉".  The body content
-              ;; carries the fenced source.
-              (put-text-property (marker-position body-start) panel-bottom
-                                 'agent-shell-markdown-source "")
+        (let* ((lang (map-elt block :language))
+               (blockquote-depth (or (map-elt block :blockquote-depth) 0))
+               (body-start (copy-marker open-end))
+               (body-end (copy-marker (1- close-start)))
+               (source (buffer-substring-no-properties open-start close-end))
+               (highlighted (when highlight-blocks
+                              (agent-shell-markdown--highlight-code
+                               (agent-shell-markdown--strip-blockquote-markers
+                                (buffer-substring-no-properties body-start body-end)
+                                blockquote-depth)
+                               lang))))
+          ;; Delete in reverse position order so earlier offsets stay
+          ;; valid; body markers adjust automatically.
+          (delete-region close-start close-end)
+          ;; A quoted block's `>' markers aren't code: drop them so the
+          ;; body copies as plain code.  The bars come back as part of
+          ;; the panel's `line-prefix' below.
+          (agent-shell-markdown--delete-blockquote-markers
+           :start body-start :end body-end :depth blockquote-depth)
+          (delete-region open-start open-end)
+          ;; Seed the bg panel on body chars first, then layer language
+          ;; font-lock faces on top — the foreground colors take priority
+          ;; per glyph while the `:extend t' background fills the gaps
+          ;; and reaches the right edge of the window.  Include the
+          ;; trailing `\\n' (the one that sat between body and close
+          ;; fence, preserved by the deletes above): `:extend t' only
+          ;; extends the background when the face is in effect at
+          ;; end-of-line, so without the `\\n' carrying the face the
+          ;; last body line's bg would stop at the last content char.
+          (let ((body-bg-end (min (1+ (marker-position body-end))
+                                  (point-max)))
+                ;; `line-prefix' / `wrap-prefix' visually inset each
+                ;; rendered line: 2 plain cols then 2 bg-tinted cols.
+                ;; Copying chars out of the block yanks raw source with
+                ;; no leading indentation.  `wrap-prefix' handles long
+                ;; lines that wrap.  Splitting the prefix this way keeps
+                ;; the panel from running hard to the window's left edge
+                ;; while still drawing a clear tinted gutter.
+                ;; A quoted block's bars go after the plain cols, where
+                ;; the quote's own lines draw them.
+                (prefix (concat "  "
+                                (agent-shell-markdown--blockquote-bars blockquote-depth)
+                                (propertize
+                                 "  " 'face
+                                 'agent-shell-markdown-source-block))))
+            (put-text-property (marker-position body-start) body-bg-end
+                               'face 'agent-shell-markdown-source-block)
+            (agent-shell-markdown--apply-faces-from highlighted
+                                                    (marker-position body-start))
+            (add-text-properties (marker-position body-start) body-bg-end
+                                 `(agent-shell-markdown-frozen t
+                                                               agent-shell-non-trimmable t
+                                                               rear-nonsticky (agent-shell-markdown-frozen
+                                                                               agent-shell-non-trimmable)
+                                                               line-prefix ,prefix
+                                                               wrap-prefix ,prefix))
+            ;; Insert an actionable "LANG ⧉" / "snippet ⧉" label and the
+            ;; surrounding panel padding as REAL BUFFER TEXT — no
+            ;; `display' properties (which previously caused the body's
+            ;; first char to be hidden / clipped, see #597 "Make code
+            ;; block label actual buffer text"), no overlays.  Layout
+            ;; relative to the original body: `<vpad>\\n<label>\\n\\n
+            ;; <body>\\n<vpad>\\n', where each padding `\\n' carries the
+            ;; panel bg face so its line renders as a tinted blank line.
+            ;; RET or mouse-1 on the label kills the body to the kill
+            ;; ring.  `content-start' uses insertion-type t so it stays
+            ;; AFTER the inserted prefix, giving the kill-action a
+            ;; stable pointer to body content even though `body-start'
+            ;; itself collapses to the leading vpad's first char.
+            ;; After insertion we carry the body's caller-set properties
+            ;; (`invisible', agent-shell-ui block/section markers,
+            ;; `read-only', etc.) onto the inserted chars — propertize'd
+            ;; inserts ignore stickiness, and without this the inserted
+            ;; prefix punches a hole in the caller's contiguous block
+            ;; range and breaks toggle/replace operations.
+            (let* ((label-text (concat (if (string-empty-p lang) "snippet" lang)
+                                       " "
+                                       ;; Tag the copy glyph so item
+                                       ;; navigation can land on the
+                                       ;; affordance itself (see
+                                       ;; `agent-shell-markdown--next-visible-source-block').
+                                       (propertize
+                                        "⧉"
+                                        'agent-shell-markdown-source-block-copy t)))
+                   (content-start (copy-marker (marker-position body-start) t))
+                   (kill-action (lambda ()
+                                  (interactive)
+                                  ;; Locate the body by text property in
+                                  ;; the current buffer so copy works in
+                                  ;; any buffer that received a propertized
+                                  ;; copy of the rendered block (e.g. the
+                                  ;; viewport).
+                                  (when-let* ((start (next-single-property-change
+                                                      (point)
+                                                      'agent-shell-markdown-source-block-body))
+                                              ((get-text-property
+                                                start
+                                                'agent-shell-markdown-source-block-body))
+                                              (end (next-single-property-change
+                                                    start
+                                                    'agent-shell-markdown-source-block-body)))
+                                    (kill-new (buffer-substring-no-properties start end))
+                                    (message "Copied"))))
+                   (label-map (agent-shell-markdown--make-ret-binding-map
+                               kill-action))
+                   (vpad-line (propertize "\n"
+                                          'face 'agent-shell-markdown-source-block
+                                          'line-prefix prefix
+                                          'wrap-prefix prefix
+                                          'agent-shell-non-trimmable t
+                                          'rear-nonsticky
+                                          '(agent-shell-non-trimmable)))
+                   (label (propertize
+                           label-text
+                           'face 'agent-shell-markdown-source-block-language
+                           'pointer 'hand
+                           'keymap label-map
+                           'cursor-sensor-functions
+                           (agent-shell-markdown--make-hint-sensor
+                            (lambda ()
+                              (agent-shell-markdown--action-hint
+                               :action kill-action
+                               :keymap label-map
+                               :verb "copy")))
+                           'agent-shell-markdown-frozen t
+                           ;; `cursor-sensor-functions' included so the
+                           ;; hint stops at the label rather than showing
+                           ;; on the character after it.
+                           'rear-nonsticky '(agent-shell-markdown-frozen
+                                             cursor-sensor-functions)
+                           'line-prefix prefix
+                           'wrap-prefix prefix))
+                   ;; Top vpad `\\n' + label + middle vpad `\\n' + a
+                   ;; second `\\n' that becomes the first column of the
+                   ;; line carrying body content.
+                   (header (concat vpad-line label vpad-line vpad-line))
+                   (carried (agent-shell-markdown--carry-properties body-start)))
+              (goto-char body-start)
+              (insert header)
+              (when carried
+                (add-text-properties (marker-position body-start)
+                                     (marker-position content-start)
+                                     carried))
+              ;; Tag body content so the label's copy action can locate
+              ;; it by text property, survives a propertized copy into
+              ;; another buffer (e.g. viewport).
               (put-text-property (marker-position content-start)
                                  (marker-position body-end)
-                                 'agent-shell-markdown-source source)
-              ;; Tag the whole block (top vpad through bottom vpad) so
-              ;; `--pad-rendered-blocks' can find it.  `body-start' has
-              ;; collapsed to the block's top after the header insert
-              ;; above.  Like `agent-shell-markdown-table-source', the
-              ;; value is the block's own source, so two panels rendered
-              ;; flush against each other stay distinguishable (see
-              ;; `agent-shell-markdown--separate-source-blocks').
-              (put-text-property (marker-position body-start) panel-bottom
-                                 'agent-shell-markdown-source-block-rendered
-                                 source))))))))
+                                 'agent-shell-markdown-source-block-body t)
+              ;; Bottom vpad: insert a single tinted `\\n' AFTER the
+              ;; body's trailing newline so the panel ends on a blank
+              ;; tinted line below the last body line.  body-end
+              ;; (insertion-type nil) stays put across this insert; the
+              ;; vpad lives at [body-end, body-end+1) within the buffer.
+              (let ((panel-bottom (marker-position body-end)))
+                (save-excursion
+                  (when (and (< (marker-position body-end) (point-max))
+                             (eq (char-after (marker-position body-end)) ?\n))
+                    (goto-char (1+ (marker-position body-end)))
+                    (let ((vpad-start (point)))
+                      (insert vpad-line)
+                      (when carried
+                        (add-text-properties vpad-start (point) carried))
+                      (setq panel-bottom (point)))))
+                ;; The inserted panel chrome (language label, copy icon,
+                ;; padding) is not markdown, so give it an empty source: a
+                ;; selection that contains it reconstructs to nothing
+                ;; rather than leaking e.g. "python ⧉".  The body content
+                ;; carries the fenced source.
+                (put-text-property (marker-position body-start) panel-bottom
+                                   'agent-shell-markdown-source "")
+                (put-text-property (marker-position content-start)
+                                   (marker-position body-end)
+                                   'agent-shell-markdown-source source)
+                ;; Tag the whole block (top vpad through bottom vpad) so
+                ;; `--pad-rendered-blocks' can find it.  `body-start' has
+                ;; collapsed to the block's top after the header insert
+                ;; above.  Like `agent-shell-markdown-table-source', the
+                ;; value is the block's own source, so two panels rendered
+                ;; flush against each other stay distinguishable (see
+                ;; `agent-shell-markdown--separate-source-blocks').
+                (put-text-property (marker-position body-start) panel-bottom
+                                   'agent-shell-markdown-source-block-rendered
+                                   source)
+                ;; Lets framing keep the quote's bars running through
+                ;; the gaps it inserts around the panel (see
+                ;; `agent-shell-markdown--frame-block').
+                (unless (zerop blockquote-depth)
+                  (put-text-property (marker-position body-start) panel-bottom
+                                     'agent-shell-markdown-blockquote-depth
+                                     blockquote-depth)))))))))
 
 (defconst agent-shell-markdown--table-line-regexp
   (rx line-start
@@ -2482,7 +2582,7 @@ becomes:
                 (delete-region blank-start (point))))
           (forward-line 1))))))
 
-(defun agent-shell-markdown--insert-block-padding ()
+(defun agent-shell-markdown--insert-block-padding (&optional blockquote-depth)
   "Insert an untinted blank line at point to frame a rendered block.
 
 The `\\n' carries `agent-shell-markdown-source' `\"\\n\"' so copy
@@ -2496,11 +2596,20 @@ would corrupt the gap is stripped afterwards: the block tags, the
 `line-prefix' / `wrap-prefix' indent, `font-lock-face' (which,
 unlike `face', survives `--carry-properties'), and `display' (a
 list marker's bullet / checkbox glyph, which would otherwise render
-in place of the gap's newline)."
+in place of the gap's newline).
+
+BLOCKQUOTE-DEPTH, when non-nil, places the gap inside a blockquote that
+deep: it shows the quote's bars and copies as a bare `>' line, so the
+quote isn't split in two.  For example, with BLOCKQUOTE-DEPTH 2 the gap
+shows \"  ▌ ▌ \" and copies as \"> >\\n\"."
   (let ((start (point))
         (carried (agent-shell-markdown--carry-properties (point))))
     (insert (propertize "\n"
-                        'agent-shell-markdown-source "\n"
+                        'agent-shell-markdown-source
+                        (if blockquote-depth
+                            (concat (string-join (make-list blockquote-depth ">") " ")
+                                    "\n")
+                          "\n")
                         'agent-shell-non-trimmable t
                         'fontified t
                         'rear-nonsticky '(agent-shell-non-trimmable)))
@@ -2508,11 +2617,19 @@ in place of the gap's newline)."
       (add-text-properties start (point) carried))
     (remove-text-properties start (point)
                             '(display nil
-                                      font-lock-face nil
-                                      line-prefix nil
-                                      wrap-prefix nil
-                                      agent-shell-markdown-source-block-rendered nil
-                                      agent-shell-markdown-list-rendered nil))))
+                              font-lock-face nil
+                              line-prefix nil
+                              wrap-prefix nil
+                              agent-shell-markdown-source-block-rendered nil
+                              agent-shell-markdown-list-rendered nil
+                              agent-shell-markdown-blockquote-depth nil))
+    (when blockquote-depth
+      ;; Same plain cols as a source block panel's `line-prefix', so the
+      ;; gap's bars line up with the panel's.
+      (let ((prefix (concat "  " (agent-shell-markdown--blockquote-bars
+                                  blockquote-depth))))
+        (add-text-properties start (point)
+                             (list 'line-prefix prefix 'wrap-prefix prefix))))))
 
 (defun agent-shell-markdown--frame-block (start end continues-p &optional hangs-p)
   "Frame the rendered block spanning [START, END) with blank lines.
@@ -2531,29 +2648,88 @@ the block.
 
 HANGS-P, when non-nil, is a predicate called with point at the
 preceding line's start; a non-nil return means the block hangs off
-that line (a list under its bold lead-in), so the top gap is skipped."
-  ;; Bottom first: it sits below START, so START stays valid for the
-  ;; top insert without tracking it across the edit.
-  (let ((following (save-excursion
+that line (a list under its bold lead-in), so the top gap is skipped.
+
+A block inside a blockquote (tagged `agent-shell-markdown-blockquote-depth')
+treats a bare `>' line as blank, and a gap between it and a line of
+the same quote keeps the quote's bars.  For example, a panel rendered
+from:
+
+  > Here:
+  > ```sh
+  > ls
+  > ```
+  > after
+
+gains a gap above and below it, each drawn as \"  ▌ \"."
+  (let ((depth (or (get-text-property start 'agent-shell-markdown-blockquote-depth) 0))
+        (following (save-excursion
                      (goto-char (max (point-min) (1- end)))
                      (forward-line 1)
                      (point))))
+    ;; Bottom first: it sits below START, so START stays valid for the
+    ;; top insert without tracking it across the edit.
     (when (and (< following (point-max))
-               (not (agent-shell-markdown--blank-line-at-p following))
+               (not (agent-shell-markdown--blockquote-blank-line-at-p following depth))
                (not (and continues-p
                          (save-excursion
                            (goto-char following)
                            (funcall continues-p)))))
       (goto-char following)
-      (agent-shell-markdown--insert-block-padding)))
-  (when (and (> start (point-min))
-             (not (save-excursion
-                    (goto-char start)
-                    (forward-line -1)
-                    (or (agent-shell-markdown--blank-line-at-p (point))
-                        (and hangs-p (funcall hangs-p))))))
-    (goto-char start)
-    (agent-shell-markdown--insert-block-padding)))
+      (agent-shell-markdown--insert-block-padding
+       (agent-shell-markdown--blockquote-gap-depth following depth)))
+    (when-let*(((> start (point-min)))
+                (preceding (save-excursion
+                             (goto-char start)
+                             (forward-line -1)
+                             (point)))
+                ((not (save-excursion
+                        (goto-char preceding)
+                        (or (agent-shell-markdown--blockquote-blank-line-at-p (point) depth)
+                            (and hangs-p (funcall hangs-p)))))))
+      (goto-char start)
+      (agent-shell-markdown--insert-block-padding
+       (agent-shell-markdown--blockquote-gap-depth preceding depth)))))
+
+(defun agent-shell-markdown--blockquote-line-at-p (pos depth)
+  "Return non-nil when the line holding POS sits in a DEPTH-deep blockquote.
+That is a line opening with DEPTH `>' markers, or a quoted panel of
+the same DEPTH.  Always nil when DEPTH is 0.
+
+For example, with DEPTH 1 the lines \"> after\" and \"> > after\" sit
+in the blockquote, while \"after\" does not."
+  (and (> depth 0)
+       (save-excursion
+         (goto-char pos)
+         (beginning-of-line)
+         (or (eql (get-text-property (point) 'agent-shell-markdown-blockquote-depth)
+                  depth)
+             (looking-at-p (agent-shell-markdown--blockquote-markers-regexp depth))))))
+
+(defun agent-shell-markdown--blockquote-blank-line-at-p (pos depth)
+  "Return non-nil when the line holding POS is blank within a DEPTH-deep quote.
+Like `agent-shell-markdown--blank-line-at-p', but a line holding only
+DEPTH `>' markers counts as blank too.
+
+For example, with DEPTH 1 the lines \"\" and \">\" are blank, while
+\"> after\" is not.  With DEPTH 0, \">\" is not blank."
+  (or (agent-shell-markdown--blank-line-at-p pos)
+      (and (> depth 0)
+           (save-excursion
+             (goto-char pos)
+             (beginning-of-line)
+             (looking-at-p (concat (agent-shell-markdown--blockquote-markers-regexp depth)
+                                   "[[:blank:]]*$"))))))
+
+(defun agent-shell-markdown--blockquote-gap-depth (pos depth)
+  "Return DEPTH when the line at POS sits in the same DEPTH-deep quote.
+A framing gap beside that line then belongs to the quote.  Returns
+nil otherwise, including when DEPTH is 0.
+
+For example, with DEPTH 1 this returns 1 beside \"> after\" and nil
+beside \"after\"."
+  (when (agent-shell-markdown--blockquote-line-at-p pos depth)
+    depth))
 
 (defun agent-shell-markdown--block-end (start property)
   "Return where PROPERTY stops for the block of lines beginning at START.
@@ -2701,7 +2877,10 @@ renders its two panels with an untinted blank line between them."
         (when (and (get-text-property pos 'agent-shell-markdown-source-block-rendered)
                    (get-text-property (1- pos) 'agent-shell-markdown-source-block-rendered))
           (goto-char pos)
-          (agent-shell-markdown--insert-block-padding))))))
+          (agent-shell-markdown--insert-block-padding
+           (agent-shell-markdown--blockquote-gap-depth
+            (1- pos)
+            (or (get-text-property pos 'agent-shell-markdown-blockquote-depth) 0))))))))
 
 (defun agent-shell-markdown--list-item-pending-p ()
   "Return non-nil when the line at point is or may still become a list item.
@@ -6236,7 +6415,12 @@ alist:
    (:block . RANGE)         a `:start'/`:end' marker range covering
                             the whole block, tracking buffer edits
    (:body . BODY)           body text, or nil while still streaming
+   (:blockquote-depth . DEPTH)   number of `>' markers before the fence
    (:complete . COMPLETE))  t once the closing fence has arrived
+
+A fence may sit inside a blockquote (`> ```python').  Its closing
+fence must carry the same number of `>' markers, and BODY has those
+markers stripped from each line.
 
 RANGE is `((:start . MARKER) (:end . MARKER))' (see
 `agent-shell-markdown--make-range') spanning the opening fence line
@@ -6263,28 +6447,35 @@ returns one descriptor with :language \"math\", :body
         (open-start nil)
         (open-count nil)
         (open-language nil)
+        (open-depth nil)
         (body-start nil)
         (case-fold-search nil))
     (save-excursion
       (goto-char (point-min))
       (while (re-search-forward
-              (rx bol (zero-or-more blank)
+              (rx bol
+                  (group (zero-or-more (regexp agent-shell-markdown--blockquote-marker-regexp)))
+                  (zero-or-more blank)
                   (group (>= 3 "`"))
                   (zero-or-more blank)
                   (group (zero-or-more (or alphanumeric "-" "+" "#")))
                   (zero-or-more not-newline))
               nil t)
-        (let ((count (- (match-end 1) (match-beginning 1))))
+        (let ((count (- (match-end 2) (match-beginning 2)))
+              (depth (seq-count (lambda (char) (eq char ?>)) (match-string 1))))
           (cond
            ;; Fences inside already-rendered text are body, not markup.
-           ((get-text-property (match-beginning 1) 'agent-shell-markdown-frozen))
+           ((get-text-property (match-beginning 2) 'agent-shell-markdown-frozen))
            ;; A closing fence carries no info string, so an inner
            ;; "```elisp" is body of an open "```markdown" block.
            ((and open-count (>= count open-count)
+                 (= depth open-depth)
                  (string-blank-p (buffer-substring-no-properties
-                                  (match-end 1) (match-end 0))))
-            (let ((raw (buffer-substring-no-properties
-                        body-start (match-beginning 0))))
+                                  (match-end 2) (match-end 0))))
+            (let ((raw (agent-shell-markdown--strip-blockquote-markers
+                        (buffer-substring-no-properties
+                         body-start (match-beginning 0))
+                        open-depth)))
               (push (list (cons :language open-language)
                           (cons :block (agent-shell-markdown--make-range
                                         :start (copy-marker open-start)
@@ -6292,16 +6483,18 @@ returns one descriptor with :language \"math\", :body
                           (cons :body (if (string-suffix-p "\n" raw)
                                           (substring raw 0 -1)
                                         raw))
+                          (cons :blockquote-depth open-depth)
                           (cons :complete t))
                     source-blocks))
-            (setq open-start nil open-count nil
+            (setq open-start nil open-count nil open-depth nil
                   open-language nil body-start nil))
            ((not open-count)
             (setq open-start (match-beginning 0)
                   open-count count
+                  open-depth depth
                   open-language (downcase
                                  (buffer-substring-no-properties
-                                  (match-beginning 2) (match-end 2)))
+                                  (match-beginning 3) (match-end 3)))
                   body-start (line-beginning-position 2))))))
       (when open-count
         (push (list (cons :language open-language)
@@ -6309,6 +6502,7 @@ returns one descriptor with :language \"math\", :body
                                   :start (copy-marker open-start)
                                   :end (copy-marker (point-max))))
                     (cons :body nil)
+                    (cons :blockquote-depth open-depth)
                     (cons :complete nil))
               source-blocks)))
     (nreverse source-blocks)))
