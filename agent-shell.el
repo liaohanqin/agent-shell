@@ -4,19 +4,19 @@
 
 ;; Author: Alvaro Ramirez https://xenodium.com
 ;; URL: https://github.com/xenodium/agent-shell
-;; Version: 0.95.4
-;; Package-Requires: ((emacs "29.1") (shell-maker "0.98.2") (acp "0.17.1"))
+;; Version: 0.98.4
+;; Package-Requires: ((emacs "29.1") (shell-maker "0.98.3") (acp "0.20.1"))
 
-(defconst agent-shell--version "0.95.4")
+(defconst agent-shell--version "0.98.4")
 
 ;; Minimum dependency versions, as declared in the `Package-Requires'
 ;; header above.  Package managers that resolve versions enforce the
 ;; header on install; those that only resolve dependency names (straight.el,
 ;; for one) leave `agent-shell--start' as the sole check, so keep these two
 ;; in sync with it.
-(defconst agent-shell--shell-maker-minimum-version "0.98.2")
+(defconst agent-shell--shell-maker-minimum-version "0.98.3")
 
-(defconst agent-shell--acp-minimum-version "0.17.1")
+(defconst agent-shell--acp-minimum-version "0.20.1")
 
 ;; This package is free software; you can redistribute it and/or modify
 ;; it under the terms of the GNU General Public License as published by
@@ -314,6 +314,32 @@ are applied.  Each function is called with a range alist containing:
   :label-right - The right label range (if present)
   :padding     - The padding range with :start and :end (if present)"
   :type 'hook
+  :group 'agent-shell)
+
+(defcustom agent-shell-notice-filter-function nil
+  "Function to filter or transform notices before they are displayed.
+
+Notices are errors and stderr output reported by the agent, shown
+under the \"Notices\" section.
+
+When nil, all notices are displayed unchanged.
+
+Otherwise called with an alist containing:
+
+  :text  The notice text, without its trailing newline.  Agent stderr
+         is delivered one line per notice.
+
+Return the text to display (possibly modified), or nil to drop the
+notice.
+
+For example, to drop idle-compaction notices:
+
+  (setq agent-shell-notice-filter-function
+        (lambda (notice)
+          (unless (string-prefix-p \"[idle-compaction]\"
+                                   (map-elt notice :text))
+            (map-elt notice :text))))"
+  :type '(choice (const :tag "Display all" nil) function)
   :group 'agent-shell)
 
 (defcustom agent-shell-highlight-blocks t
@@ -953,6 +979,7 @@ Each element can be:
                                               default-session-mode-id
                                               default-config-options
                                               session-meta
+                                              system-prompt
                                               mcp-servers
                                               notification-adapter
                                               notification-handler
@@ -986,6 +1013,8 @@ Keyword arguments:
 - SESSION-META: Optional alist of agent-specific metadata sent as `_meta'
   with session-creating requests (`session/new', `session/load',
   `session/resume', and `session/fork').
+- SYSTEM-PROMPT: Optional string appended to the agent's default system
+  prompt, taking precedence over the global `agent-shell-system-prompt'.
 - MCP-SERVERS: Optional list of MCP servers for this agent, taking
   precedence over the global `agent-shell-mcp-servers'.  Same shape as
   that variable.
@@ -1011,6 +1040,7 @@ Returns an alist with all specified values."
     (:default-session-mode-id . ,default-session-mode-id)       ;; function
     (:default-config-options . ,default-config-options)         ;; function
     (:session-meta . ,session-meta)
+    (:system-prompt . ,system-prompt)
     (:mcp-servers . ,mcp-servers)
     (:notification-adapter . ,notification-adapter)            ;; function
     (:notification-handler . ,notification-handler)            ;; function
@@ -1451,6 +1481,19 @@ configured to merely preselect (see `agent-shell-preferred-agent-config')."
   (pcase (agent-shell--preferred-config-and-mode)
     (`(,config . nil) config)))
 
+(defcustom agent-shell-system-prompt nil
+  "Instructions appended to the agent's default system prompt.
+
+Sent when a session is created, loaded, resumed or forked, to agents
+advertising the `systemPrompt' session capability.  For example:
+
+  (setq agent-shell-system-prompt \"Keep answers short.\")
+
+An agent config's `:system-prompt' takes precedence over this value."
+  :type '(choice (const :tag "None" nil)
+                 string)
+  :group 'agent-shell)
+
 (defcustom agent-shell-mcp-servers nil
   "List of MCP servers to initialize when creating a new session.
 
@@ -1565,6 +1608,7 @@ OUTGOING-REQUEST-DECORATOR (passed through to `acp-make-client')."
         (cons :supports-session-load nil)
         (cons :supports-session-resume nil)
         (cons :supports-session-fork nil)
+        (cons :supports-system-prompt nil)
         (cons :supports-steering nil)
         (cons :resume-session-id nil)
         (cons :fork-session-id nil)
@@ -5731,9 +5775,9 @@ own banner, passing along their shell-maker config."
    ;; Align bullets with the welcome text.
    (let ((agent-shell-markdown-list-line-prefix (make-string 7 ?\s)))
      (agent-shell-markdown-convert
-      "- `2026-10-13` [agent-shell 0.87 updates](https://xenodium.com/agent-shell-0-87-updates){tracking-label=\"(new)\"}
-- `2026-09-22` [agent-shell 0.78 updates](https://xenodium.com/agent-shell-0-78-updates)
-- `2026-08-15` [agent-shell 0.73 updates](https://xenodium.com/agent-shell-0-73-updates)"
+      "- `2026-11-19` [agent-shell 0.98 updates](https://xenodium.com/agent-shell-0-98-updates){tracking-label=\"(new)\"}
+- `2026-10-13` [agent-shell 0.87 updates](https://xenodium.com/agent-shell-0-87-updates){tracking-label=\"(new)\"}
+- `2026-09-22` [agent-shell 0.78 updates](https://xenodium.com/agent-shell-0-78-updates)"
       :tracking-file (locate-user-emacs-file "agent-shell/markdown-links.eld")))
    "\n\n"
    "       FUNDING\n\n"
@@ -5790,7 +5834,14 @@ variable (see makunbound)"))
                               :prompt (map-elt config :shell-prompt)
                               :prompt-regexp (map-elt config :shell-prompt-regexp)))
          (agent-shell--shell-maker-config shell-maker-config)
-         (default-directory (let ((cwd (or cwd (agent-shell-cwd))))
+         (default-directory (let ((cwd (or cwd
+                                          ;; A project chosen with
+                                          ;; `project-switch-project' outranks
+                                          ;; the shell it was chosen from.
+                                          (if (bound-and-true-p
+                                               project-current-directory-override)
+                                              (agent-shell--new-shell-cwd)
+                                            (agent-shell-cwd)))))
                               ;; `shell-maker-start-v2' would otherwise quietly
                               ;; fall back to "~/" and use that value forever.
                               (unless (file-directory-p cwd)
@@ -6098,17 +6149,36 @@ the reported range down to the newly inserted chars."
   (when-let* ((untagged (text-property-not-all start end 'field 'output)))
     (add-text-properties untagged end '(field output))))
 
+(defun agent-shell--text-change-unsafe-p ()
+  "Return non-nil if a timer must not change buffer text right now.
+
+Redisplay binds `inhibit-redisplay' around the Lisp it runs, and
+`with-silent-modifications' binds `inhibit-modification-hooks'.  A
+fontification function that calls `sit-for' (as emojify does) runs due
+timers in there, and text inserted from them leaves the display iterator
+on stale positions, aborting Emacs (issue #953).
+
+For example, returns t when called from a timer that emojify's
+`sit-for' ran during fontification, and nil from an ordinary timer."
+  (or inhibit-redisplay inhibit-modification-hooks))
+
 (defun agent-shell--arm-stream-render-timer (state)
-  "Schedule STATE's pending batch without postponing an existing timer."
+  "Schedule STATE's pending batch without postponing an existing timer.
+
+When the timer fires mid-redisplay (see
+`agent-shell--text-change-unsafe-p'), the batch stays pending and the
+timer is rearmed."
   (unless (map-elt state :stream-render-timer)
     (map-put! state :stream-render-timer
               (run-at-time agent-shell--stream-render-interval nil
                            (lambda ()
                              (map-put! state :stream-render-timer nil)
-                             (when-let* ((buffer (map-elt state :buffer))
-                                         ((buffer-live-p buffer)))
-                               (with-current-buffer buffer
-                                 (agent-shell--flush-stream-render state))))))))
+                             (if (agent-shell--text-change-unsafe-p)
+                                 (agent-shell--arm-stream-render-timer state)
+                               (when-let* ((buffer (map-elt state :buffer))
+                                           ((buffer-live-p buffer)))
+                                 (with-current-buffer buffer
+                                   (agent-shell--flush-stream-render state)))))))))
 
 (defun agent-shell--cancel-stream-render-timer (state)
   "Cancel STATE's pending stream render timer, if any."
@@ -6475,9 +6545,10 @@ which mid-turn is past whatever the user is typing."
   "Go to next item.
 
 Could be a prompt, an expandable item, a displayed image, a rendered
-link, a source block, or a rendered markdown table.  A table is entered
-at its first cell, then walked one cell (and one link inside a cell) at
-a time, moving on to the item after it once past its last one.
+link, a source block, a blockquote, or a rendered markdown table.  A
+table is entered at its first cell, then walked one cell (and one link
+inside a cell) at a time, moving on to the item after it once past its
+last one.
 
 With prefix LEAVE-TABLE, carry on from the end of the table point is
 in, landing on the item after it rather than on its next cell.  A wide
@@ -6520,6 +6591,8 @@ insert the character instead."
                        (agent-shell-markdown--next-visible-link)))
            (source-block-pos (save-mark-and-excursion
                                (agent-shell-markdown--next-visible-source-block)))
+           (blockquote-pos (save-mark-and-excursion
+                            (agent-shell-markdown--next-visible-blockquote)))
            (table-pos (save-mark-and-excursion
                         (agent-shell-markdown--search-visible
                          :property 'agent-shell-markdown-table-cell-start)))
@@ -6535,6 +6608,7 @@ insert the character instead."
                                                            image-pos
                                                            link-pos
                                                            source-block-pos
+                                                           blockquote-pos
                                                            table-pos)))))
            (next-pos (when positions
                        (seq-min positions))))
@@ -6548,9 +6622,9 @@ insert the character instead."
   "Go to previous item.
 
 Could be a prompt, an expandable item, a displayed image, a rendered
-link, a source block, or a rendered markdown table.  A table above is
-entered at its first cell, so navigating again from there leaves it for
-the item above it.
+link, a source block, a blockquote, or a rendered markdown table.  A
+table above is entered at its first cell, so navigating again from
+there leaves it for the item above it.
 
 With prefix LEAVE-TABLE, carry on from the start of the table point is
 in, as `agent-shell-next-item' does from its end.
@@ -6591,6 +6665,8 @@ insert the character instead."
            (source-block-pos
             (save-mark-and-excursion
               (agent-shell-markdown--previous-visible-source-block)))
+           (blockquote-pos (save-mark-and-excursion
+                            (agent-shell-markdown--previous-visible-blockquote)))
            (table-pos (save-mark-and-excursion
                         (agent-shell-markdown--search-visible
                          :property 'agent-shell-markdown-table-cell-start
@@ -6607,6 +6683,7 @@ insert the character instead."
                                                            image-pos
                                                            link-pos
                                                            source-block-pos
+                                                           blockquote-pos
                                                            table-pos)))))
            (next-pos (when positions
                        (seq-max positions))))
@@ -6635,22 +6712,33 @@ composing a prompt."
 With `:INHERIT-ENV' t, also inherit system environment (as per `setenv')
 With `:LOAD-ENV' PATH-OR-PATHS, load .env files from given path(s).
 
+A value may also be a function taking no arguments.  It is called when
+the agent starts rather than now, which suits secrets that aren't
+available yet (for example, a password store still locked at init).
+Such a value is kept as a (NAME . FUNCTION) element until
+`agent-shell--resolve-environment-variables' calls it.
+
 For example:
 
   (agent-shell-make-environment-variables
     \"PATH\" \"/usr/bin\"
     \"HOME\" \"/home/user\"
+    \"SECRET\" (lambda ()
+                 (auth-source-pick-first-password :host \"example.org\"))
     :load-env \"~/.env\")
 
 Returns:
 
    (\"PATH=/usr/bin\"
-    \"HOME=/home/user\")."
+    \"HOME=/home/user\"
+    (\"SECRET\" . (lambda () ...)))."
   (unless (zerop (mod (length vars) 2))
     (error "`agent-shell-make-environment' must receive complete pairs"))
   (append (mapcan (lambda (pair)
                     (unless (keywordp (car pair))
-                      (list (format "%s=%s" (car pair) (cadr pair)))))
+                      (list (if (functionp (cadr pair))
+                                (cons (car pair) (cadr pair))
+                              (format "%s=%s" (car pair) (cadr pair))))))
                   (seq-partition vars 2))
           (when load-env
             (let ((paths (if (listp load-env) load-env (list load-env))))
@@ -6670,6 +6758,36 @@ Returns:
                       paths)))
           (when inherit-env
             process-environment)))
+
+(cl-defun agent-shell--resolve-environment-variables (&key environment-variables on-failure)
+  "Return ENVIRONMENT-VARIABLES with deferred values resolved.
+
+Strings are kept as is.  Each (NAME . FUNCTION) element, as made by
+`agent-shell-make-environment-variables', becomes \"NAME=VALUE\" with
+VALUE from calling FUNCTION.  An element whose FUNCTION signals or
+returns nil is omitted, and ON-FAILURE is called with an alist holding
+its :name and the error :message.
+
+For example:
+
+  (agent-shell--resolve-environment-variables
+   :environment-variables (list \"A=1\" (cons \"B\" (lambda () \"2\"))))
+  ;; => (\"A=1\" \"B=2\")"
+  (seq-mapcat (lambda (variable)
+                (if (stringp variable)
+                    (list variable)
+                  (condition-case err
+                      (list (format "%s=%s"
+                                    (car variable)
+                                    (or (funcall (cdr variable))
+                                        (error "Function returned nil"))))
+                    (error
+                     (when on-failure
+                       (funcall on-failure
+                                `((:name . ,(car variable))
+                                  (:message . ,(error-message-string err)))))
+                     nil))))
+              environment-variables))
 
 (defvar-local agent-shell--header-cache nil
   "Cache for graphical headers (no need for regenerating regularly).
@@ -7732,8 +7850,15 @@ recorded in STATE and released by `agent-shell--uninhibit-sleep'."
     ;; Report the failure so the user can set `agent-shell-inhibit-system-sleep'
     ;; to nil to opt out.
     (condition-case err
-        (when-let* ((token (system-sleep-block-sleep "agent-shell (agent busy)" t)))
-          (map-put! state :sleep-token token))
+        (let ((token (system-sleep-block-sleep "agent-shell (agent busy)" t)))
+          (cond
+           ((consp token)
+            (map-put! state :sleep-token token))
+           ;; Some failures (e.g. logind requiring interactive polkit
+           ;; authorization) don't signal.  `system-sleep' warns instead
+           ;; and returns `warn''s t, which isn't a token to release later.
+           (token
+            (message "Sleep inhibit unavailable.  Set `agent-shell-inhibit-system-sleep' to nil to disable."))))
       (error
        (message "Sleep inhibit unavailable (%s).  Set `agent-shell-inhibit-system-sleep' to nil to disable."
                 (error-message-string err))))))
@@ -7812,6 +7937,36 @@ the original EVENT as :idle-event."
 
 ;;; Initialization
 
+(defun agent-shell--resolve-client-environment-variables ()
+  "Resolve the deferred environment variables of the shell's client.
+
+Resolving here, rather than in the client maker, calls each deferred
+value once per agent start.  `agent-shell--start' also calls the client
+maker to validate the agent's executable, and secrets must not be
+looked up (or prompted for) on those calls.
+
+Values that fail to resolve are left out of the agent's environment and
+reported in a warning above the prompt."
+  (when-let* ((client (map-elt (agent-shell--state) :client))
+              ((map-contains-key client :environment-variables)))
+    (let* ((failures nil)
+           (resolved (agent-shell--resolve-environment-variables
+                      :environment-variables (map-elt client :environment-variables)
+                      :on-failure (lambda (failure)
+                                    (push (format "%s: %s"
+                                                  (map-elt failure :name)
+                                                  (map-elt failure :message))
+                                          failures)))))
+      (map-put! client :environment-variables resolved)
+      (when failures
+        (agent-shell--update-bootstrapping-fragment
+         :state (agent-shell--state)
+         :block-id "environment-unresolved"
+         :body (agent-shell--make-boxed-message
+                :text (format "Warning: Could not resolve environment variables (omitted):
+
+%s" (string-join (nreverse failures) "\n"))))))))
+
 (cl-defun agent-shell--initialize-client ()
   "Initialize ACP client."
   (agent-shell--update-bootstrapping-fragment
@@ -7827,6 +7982,7 @@ the original EVENT as :idle-event."
         (map-put! (agent-shell--state)
                   :client (funcall (map-elt agent-shell--state :client-maker)
                                    (map-elt agent-shell--state :buffer)))
+        (agent-shell--resolve-client-environment-variables)
         (agent-shell--emit-event :event 'init-client)
         t)
     (agent-shell--update-fragment
@@ -7938,7 +8094,16 @@ Must provide ON-INITIATED (lambda ())."
                      (map-put! agent-shell--state :supports-session-fork
                                (and (listp acp-session-capabilities)
                                     (assq 'fork acp-session-capabilities)
+                                    t))
+                     (map-put! agent-shell--state :supports-system-prompt
+                               (and (listp acp-session-capabilities)
+                                    (assq 'systemPrompt acp-session-capabilities)
                                     t)))
+                   (when (and (not (map-elt agent-shell--state :supports-system-prompt))
+                              (or (map-nested-elt agent-shell--state '(:agent-config :system-prompt))
+                                  agent-shell-system-prompt))
+                     (message "%s does not support system prompts, ignoring the configured one"
+                              (map-nested-elt agent-shell--state '(:agent-config :mode-line-name))))
                    ;; Save prompt capabilities from agent, converting to internal symbols
                    (when-let* ((prompt-capabilities
                                 (map-nested-elt acp-response '(agentCapabilities promptCapabilities))))
@@ -8806,7 +8971,8 @@ defers the request by the configured number of seconds."
    :request (acp-make-session-new-request
              :cwd (agent-shell--resolve-path (agent-shell-cwd))
              :mcp-servers (agent-shell--mcp-servers)
-             :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))
+             :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+             :system-prompt (agent-shell--system-prompt))
    :buffer (current-buffer)
    :on-success (lambda (acp-response)
                  (map-put! agent-shell--state
@@ -9135,12 +9301,14 @@ listing sessions to pick one to load."
                      :session-id session-id
                      :cwd cwd
                      :mcp-servers mcp-servers
-                     :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))
+                     :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+                     :system-prompt (agent-shell--system-prompt))
                   (acp-make-session-resume-request
                    :session-id session-id
                    :cwd cwd
                    :mcp-servers mcp-servers
-                   :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))))
+                   :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+                   :system-prompt (agent-shell--system-prompt))))
      :buffer (current-buffer)
      :on-success (lambda (acp-load-response)
                    (agent-shell--set-session-from-response
@@ -9189,7 +9357,8 @@ listing sessions to pick one to load."
              :session-id session-id
              :cwd (agent-shell--resolve-path (agent-shell-cwd))
              :mcp-servers (agent-shell--mcp-servers)
-             :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))
+             :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+             :system-prompt (agent-shell--system-prompt))
    :buffer (current-buffer)
    :on-success (lambda (acp-fork-response)
                  (let ((new-session-id (map-elt acp-fork-response 'sessionId)))
@@ -9369,12 +9538,14 @@ For example, with a function returning (session-id . \"abc\"):
                                                     :session-id acp-session-id
                                                     :cwd cwd
                                                     :mcp-servers mcp-servers
-                                                    :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))
+                                                    :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+                                                    :system-prompt (agent-shell--system-prompt))
                                                  (acp-make-session-resume-request
                                                   :session-id acp-session-id
                                                   :cwd cwd
                                                   :mcp-servers mcp-servers
-                                                  :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta)))))
+                                                  :meta (map-nested-elt (agent-shell--state) '(:agent-config :session-meta))
+                                                  :system-prompt (agent-shell--system-prompt))))
                                     :buffer (current-buffer)
                                     :on-success (lambda (acp-load-response)
                                                   (agent-shell--set-session-from-response
@@ -9482,21 +9653,67 @@ The agent config's `:mcp-servers' take precedence over the global
                       :overrides (agent-shell--eval-dynamic-values server)))
                    servers))))
 
+(defun agent-shell--system-prompt ()
+  "Return the system prompt string to send with session requests, or nil.
+
+The agent config's `:system-prompt' takes precedence over the global
+`agent-shell-system-prompt'.  Return nil if the agent does not
+advertise the `systemPrompt' session capability."
+  (when (map-elt agent-shell--state :supports-system-prompt)
+    (or (map-nested-elt agent-shell--state '(:agent-config :system-prompt))
+        agent-shell-system-prompt)))
+
+(cl-defun agent-shell--filter-notice (&key text)
+  "Return notice TEXT as `agent-shell-notice-filter-function' displays it.
+
+Return nil if the notice should be dropped.  The filter sees TEXT
+without its trailing newline, and the returned text always ends in one.
+
+A filter that signals or returns a non-string is reported via `message'
+and TEXT is displayed unfiltered, so a broken filter never loses
+notices.
+
+For example, with `agent-shell-notice-filter-function' set to upcase
+the text:
+
+  (agent-shell--filter-notice :text \"rate limited\\n\")
+  ;; => \"RATE LIMITED\\n\""
+  (let* ((text (string-remove-suffix "\n" text))
+         (filtered (condition-case-unless-debug err
+                       (if agent-shell-notice-filter-function
+                           (funcall agent-shell-notice-filter-function
+                                    `((:text . ,text)))
+                         text)
+                     (error
+                      (message "`agent-shell-notice-filter-function' failed: %S" err)
+                      text))))
+    (cond
+     ((null filtered)
+      nil)
+     ((stringp filtered)
+      (concat filtered "\n"))
+     (t
+      (message "`agent-shell-notice-filter-function' must return a string or nil, got: %S"
+               filtered)
+      (concat text "\n")))))
+
 (cl-defun agent-shell--subscribe-to-client-events (&key state)
   "Subscribe SHELL and STATE to ACP events."
   (acp-subscribe-to-errors
    :client (map-elt state :client)
    :on-error (lambda (acp-error)
-               (agent-shell--update-fragment
-                :state state
-                :block-id (format "%s-notices"
-                                  (map-elt state :request-count))
-                :label-left (propertize "Notices" 'font-lock-face 'agent-shell-section-heading)
-                :body (or (map-elt acp-error 'message)
-                          (map-elt acp-error 'data)
-                          "Something is up ¯\\_ (ツ)_/¯")
-                :append t
-                :above-last-prompt (not (shell-maker-busy)))))
+               (when-let* ((text (agent-shell--filter-notice
+                                  :text (or (map-elt acp-error 'message)
+                                            (map-elt acp-error 'data)
+                                            "Something is up ¯\\_ (ツ)_/¯"))))
+                 (agent-shell--update-fragment
+                  :state state
+                  :block-id (format "%s-notices"
+                                    (map-elt state :request-count))
+                  :label-left (propertize "Notices" 'font-lock-face 'agent-shell-section-heading)
+                  :body text
+                  :append t
+                  :above-last-prompt (not (shell-maker-busy))))))
   (acp-subscribe-to-notifications
    :client (map-elt state :client)
    :on-notification (lambda (acp-notification)
@@ -11726,6 +11943,7 @@ property tells `agent-shell--filter-buffer-substring' to drop the
      0 (length rendered)
      (list 'wrap-prefix wrap
            'face 'agent-shell-markdown-blockquote
+           'font-lock-face 'agent-shell-markdown-blockquote
            'agent-shell-block-quote t)
      rendered)
     (while (string-match (rx line-start ">") rendered pos)
@@ -11820,11 +12038,16 @@ indicator (see `agent-shell-busy-indicator-frames' and
 `agent-shell-prompt-busy-frames') costs no redisplay while busy.
 
 For example, with both set to \"(busy)\", a turn redraws on its starting
-tick, its first busy tick and its ending tick, and on none in between."
+tick, its first busy tick and its ending tick, and on none in between.
+
+Busy ticks landing mid-redisplay (see `agent-shell--text-change-unsafe-p')
+are skipped; the next one catches up."
   (let ((shell-frames nil)
         (viewport-frames nil))
     (lambda (_heartbeat status)
       (when-let* (((buffer-live-p shell-buffer))
+                  ((not (and (eq status 'busy)
+                             (agent-shell--text-change-unsafe-p))))
                   (frames (with-current-buffer shell-buffer
                             (list (agent-shell--busy-indicator-frame)
                                   (agent-shell-chat--busy-frame)
@@ -12786,7 +13009,8 @@ else, which a matching window width alone cannot vouch for."
 
 (defun agent-shell--realign-rendered (buffer)
   "Re-align BUFFER's window-relative markdown: tables and images.
-Deferred worker for `agent-shell--realign-on-change'.
+Deferred worker for `agent-shell--realign-on-change'.  Reschedules
+itself when run mid-redisplay (see `agent-shell--text-change-unsafe-p').
 
 Ordinary streaming output schedules this many times a second, and each
 pass walks every rendered table and image.  A pass over content that
@@ -12799,23 +13023,27 @@ content may have been laid out elsewhere in between), a render since
 the last pass, and any caller of `agent-shell--forget-realign'."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
-      (setq agent-shell--realign-timer nil)
-      (if-let* ((window (get-buffer-window buffer t))
-                (width (window-body-width window t)))
-          (unless (and (eql width agent-shell--realign-width)
-                       (eql buffer-display-count
-                            agent-shell--realign-display-count)
-                       (null agent-shell-markdown--tables-rendered)
-                       (null agent-shell-markdown--images-pending))
-            (agent-shell-markdown-rerender-tables)
-            (agent-shell-markdown-rerender-images)
-            (setq agent-shell--realign-width width
-                  agent-shell--realign-display-count buffer-display-count))
-        ;; Shown nowhere: nothing to measure against, so this settles
-        ;; nothing.  Drop the recorded width too, or a buffer that comes
-        ;; back at the width it settled at before would skip the scan,
-        ;; though its content may have been laid out elsewhere since.
-        (agent-shell--forget-realign)))))
+      (if (agent-shell--text-change-unsafe-p)
+          (setq agent-shell--realign-timer
+                (run-with-idle-timer 0.15 nil #'agent-shell--realign-rendered
+                                     buffer))
+        (setq agent-shell--realign-timer nil)
+        (if-let* ((window (get-buffer-window buffer t))
+                  (width (window-body-width window t)))
+            (unless (and (eql width agent-shell--realign-width)
+                         (eql buffer-display-count
+                              agent-shell--realign-display-count)
+                         (null agent-shell-markdown--tables-rendered)
+                         (null agent-shell-markdown--images-pending))
+              (agent-shell-markdown-rerender-tables)
+              (agent-shell-markdown-rerender-images)
+              (setq agent-shell--realign-width width
+                    agent-shell--realign-display-count buffer-display-count))
+          ;; Shown nowhere: nothing to measure against, so this settles
+          ;; nothing.  Drop the recorded width too, or a buffer that comes
+          ;; back at the width it settled at before would skip the scan,
+          ;; though its content may have been laid out elsewhere since.
+          (agent-shell--forget-realign))))))
 
 (defun agent-shell--realign-on-change (window)
   "Re-align the window-relative markdown of the buffer shown in WINDOW.

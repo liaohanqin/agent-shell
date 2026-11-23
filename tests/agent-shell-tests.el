@@ -110,6 +110,66 @@
                          "EXISTING_VAR=existing_value")))
       (delete-file env-file))))
 
+(ert-deftest agent-shell-make-environment-variables-defers-functions-test ()
+  (let* ((called nil)
+         (secret (lambda () (setq called t) "s3cret"))
+         (vars (agent-shell-make-environment-variables
+                "PLAIN" "value"
+                "SECRET" secret)))
+    (should-not called)
+    (should (equal vars (list "PLAIN=value" (cons "SECRET" secret))))))
+
+(ert-deftest agent-shell--resolve-environment-variables-test ()
+  (let ((failures nil))
+    (should (equal (agent-shell--resolve-environment-variables
+                    :environment-variables
+                    (list "PLAIN=value"
+                          (cons "GOOD" (lambda () "resolved"))
+                          (cons "BROKEN" (lambda () (error "Store locked")))
+                          (cons "EMPTY" (lambda () nil))
+                          "LAST=value")
+                    :on-failure (lambda (failure)
+                                  (push (cons (map-elt failure :name)
+                                              (map-elt failure :message))
+                                        failures)))
+                   '("PLAIN=value" "GOOD=resolved" "LAST=value")))
+    (should (equal (nreverse failures)
+                   '(("BROKEN" . "Store locked")
+                     ("EMPTY" . "Function returned nil"))))))
+
+(ert-deftest agent-shell--resolve-client-environment-variables-test ()
+  (let* ((calls 0)
+         (client (list (cons :command "agent")
+                       (cons :environment-variables
+                             (list "PLAIN=value"
+                                   (cons "GOOD" (lambda () (setq calls (1+ calls)) "resolved"))
+                                   (cons "BROKEN" (lambda () (error "Store locked")))))))
+         (state (list (cons :client client)))
+         (warning nil))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () state))
+              ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+               (lambda (&rest args)
+                 (setq warning (plist-get args :body)))))
+      (agent-shell--resolve-client-environment-variables))
+    (should (equal (map-elt client :environment-variables)
+                   '("PLAIN=value" "GOOD=resolved")))
+    (should (= calls 1))
+    (should (string-match-p "BROKEN: Store locked" warning))
+    (should-not (string-match-p "GOOD" warning))))
+
+(ert-deftest agent-shell--resolve-client-environment-variables-no-warning-test ()
+  (let ((client (list (cons :environment-variables
+                            (list (cons "GOOD" (lambda () "resolved"))))))
+        (warned nil))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () (list (cons :client client))))
+              ((symbol-function 'agent-shell--update-bootstrapping-fragment)
+               (lambda (&rest _) (setq warned t))))
+      (agent-shell--resolve-client-environment-variables))
+    (should (equal (map-elt client :environment-variables) '("GOOD=resolved")))
+    (should-not warned)))
+
 (ert-deftest agent-shell--shorten-paths-test ()
   "Test `agent-shell--shorten-paths' function."
   ;; Mock agent-shell-cwd to return a predictable value
@@ -903,6 +963,32 @@ block -- covering the dispatch path, not just the helper in isolation."
         (should (equal rendered '("tail")))
         (should-not (map-elt state :stream-render-timer))
         (should-not (map-elt state :stream-render-pending))))))
+
+(ert-deftest agent-shell--stream-render-timer-defers-mid-redisplay-test ()
+  "Keep a batch pending when its timer fires mid-redisplay (issue #953)."
+  (with-temp-buffer
+    (let ((agent-shell--stream-render-interval 0.01)
+          (state (agent-shell--make-state :buffer (current-buffer)))
+          (rendered nil)
+          (unsafe t))
+      (cl-letf (((symbol-function 'agent-shell--update-fragment)
+                 (lambda (&rest args) (push (plist-get args :body) rendered)))
+                ((symbol-function 'agent-shell--text-change-unsafe-p)
+                 (lambda () unsafe)))
+        (agent-shell--update-streamed-fragment :state state :block-id "a" :body "tail")
+        (let ((first-timer (map-elt state :stream-render-timer)))
+          (with-timeout (2 (ert-fail "Timer never fired"))
+            (while (eq first-timer (map-elt state :stream-render-timer))
+              (accept-process-output nil 0.005))))
+        (should-not rendered)
+        (should (map-elt state :stream-render-timer))
+        (should (map-elt state :stream-render-pending))
+        (setq unsafe nil)
+        (with-timeout (2 (ert-fail "Rearmed timer never flushed the batch"))
+          (while (not rendered)
+            (accept-process-output nil 0.005)))
+        (should (equal rendered '("tail")))
+        (should-not (map-elt state :stream-render-timer))))))
 
 (ert-deftest agent-shell--stream-render-flush-without-pending-is-noop-test ()
   "Flushing with nothing pending renders nothing."
@@ -3486,6 +3572,58 @@ driven by a single helper on both paths."
                        (url . "https://global/mcp")
                        (headers . []))])))))
 
+(ert-deftest agent-shell--system-prompt-test ()
+  "Per-agent `:system-prompt' wins, and nothing is sent without the capability."
+  (let ((agent-shell-system-prompt "Global prompt."))
+    ;; The agent config's prompt wins when present.
+    (let ((agent-shell--state
+           (agent-shell--make-state
+            :agent-config (agent-shell-make-agent-config
+                           :identifier 'test
+                           :system-prompt "Per-agent prompt."))))
+      (map-put! agent-shell--state :supports-system-prompt t)
+      (should (equal (agent-shell--system-prompt) "Per-agent prompt.")))
+    ;; Falls back to the global variable when the config has no override.
+    (let ((agent-shell--state
+           (agent-shell--make-state
+            :agent-config (agent-shell-make-agent-config :identifier 'test))))
+      (map-put! agent-shell--state :supports-system-prompt t)
+      (should (equal (agent-shell--system-prompt) "Global prompt."))
+      ;; Agents not advertising the capability get no prompt.
+      (map-put! agent-shell--state :supports-system-prompt nil)
+      (should-not (agent-shell--system-prompt))))
+  (let ((agent-shell-system-prompt nil)
+        (agent-shell--state
+         (agent-shell--make-state
+          :agent-config (agent-shell-make-agent-config :identifier 'test))))
+    (map-put! agent-shell--state :supports-system-prompt t)
+    (should-not (agent-shell--system-prompt))))
+
+(ert-deftest agent-shell--initiate-new-session-sends-system-prompt-test ()
+  "Send the configured system prompt with session/new."
+  (with-temp-buffer
+    (let ((agent-shell-system-prompt "Keep answers short.")
+          (request nil))
+      (setq-local agent-shell--state
+                  (agent-shell--make-state
+                   :agent-config (agent-shell-make-agent-config :identifier 'test)
+                   :buffer (current-buffer)))
+      (map-put! agent-shell--state :supports-system-prompt t)
+      (cl-letf (((symbol-function 'agent-shell--state)
+                 (lambda () agent-shell--state))
+                ((symbol-function 'agent-shell-cwd) (lambda () "/tmp"))
+                ((symbol-function 'agent-shell--resolve-path) (lambda (path) path))
+                ((symbol-function 'agent-shell--mcp-servers) (lambda () []))
+                ((symbol-function 'agent-shell--send-request)
+                 (lambda (&rest args)
+                   (setq request (plist-get args :request)))))
+        (agent-shell--initiate-new-session :shell-buffer (current-buffer)
+                                           :on-session-init #'ignore))
+      (should (equal (map-nested-elt request '(:params systemPrompt))
+                     '((mode . "append")
+                       (content . [((type . "text")
+                                    (text . "Keep answers short."))])))))))
+
 (ert-deftest agent-shell--completion-bounds-test ()
   "Test `agent-shell--completion-bounds' function."
   (let ((path-chars "[:alnum:]/_.-"))
@@ -3699,13 +3837,13 @@ remaining subscribers nor propagate out of `agent-shell--emit-event'."
               ((symbol-function 'agent-shell-status)
                (lambda (&rest _) status))
               ((symbol-function 'system-sleep-block-sleep)
-               (lambda (&rest _) (setq blocked (1+ blocked)) 'token))
+               (lambda (&rest _) (setq blocked (1+ blocked)) '(:system test)))
               ((symbol-function 'system-sleep-unblock-sleep)
                (lambda (_token) (setq blocked (1- blocked)))))
       ;; Busy blocks sleep.
       (setq status 'busy)
       (agent-shell--emit-event :event 'input-submitted)
-      (should (equal (map-elt state :sleep-token) 'token))
+      (should (equal (map-elt state :sleep-token) '(:system test)))
       (should (= blocked 1))
 
       ;; Blocked (waiting on a permission) is waiting on user input, so
@@ -3741,7 +3879,7 @@ remaining subscribers nor propagate out of `agent-shell--emit-event'."
               ((symbol-function 'agent-shell-status)
                (lambda (&rest _) 'busy))
               ((symbol-function 'system-sleep-block-sleep)
-               (lambda (&rest _) (setq blocked (1+ blocked)) 'token))
+               (lambda (&rest _) (setq blocked (1+ blocked)) '(:system test)))
               ((symbol-function 'system-sleep-unblock-sleep)
                (lambda (_token) (setq blocked (1- blocked)))))
       (agent-shell--emit-event :event 'input-submitted)
@@ -3810,7 +3948,7 @@ remaining subscribers nor propagate out of `agent-shell--emit-event'."
               ((symbol-function 'agent-shell-status)
                (lambda (&rest _) 'busy))
               ((symbol-function 'system-sleep-block-sleep)
-               (lambda (&rest _) (setq blocked (1+ blocked)) 'token))
+               (lambda (&rest _) (setq blocked (1+ blocked)) '(:system test)))
               ((symbol-function 'system-sleep-unblock-sleep)
                (lambda (_token) (setq blocked (1- blocked)))))
       (agent-shell--emit-event :event 'input-submitted)
@@ -3819,6 +3957,38 @@ remaining subscribers nor propagate out of `agent-shell--emit-event'."
 
       (agent-shell--emit-event :event 'clean-up)
       (should (= blocked 0)))))
+
+(ert-deftest agent-shell--sync-system-sleep-non-token-not-released-test ()
+  "Test a non-token block result is reported and never released.
+`system-sleep-block-sleep' returns `warn''s t when, for example, logind
+requires interactive authorization."
+  ;; The `cl-letf' below is what makes
+  ;; `agent-shell--system-sleep-available-p' return non-nil, so these
+  ;; run on Emacs < 31 too, where the library is absent.
+  (let ((unblock-calls 0)
+        (messages nil)
+        (state (list (cons :buffer (current-buffer))
+                     (cons :event-subscriptions nil)
+                     (cons :sleep-token nil)))
+        (agent-shell-inhibit-system-sleep t))
+    (cl-letf (((symbol-function 'agent-shell--state)
+               (lambda () state))
+              ((symbol-function 'agent-shell-status)
+               (lambda (&rest _) 'busy))
+              ((symbol-function 'system-sleep-block-sleep)
+               (lambda (&rest _) t))
+              ((symbol-function 'system-sleep-unblock-sleep)
+               (lambda (_token) (setq unblock-calls (1+ unblock-calls))))
+              ((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (push (apply #'format format-string args) messages))))
+      (agent-shell--emit-event :event 'input-submitted)
+      (should-not (map-elt state :sleep-token))
+      (should (seq-find (lambda (msg)
+                          (string-prefix-p "Sleep inhibit unavailable" msg))
+                        messages))
+      (agent-shell--emit-event :event 'clean-up)
+      (should (= unblock-calls 0)))))
 
 (ert-deftest agent-shell-subscribe-to-prompt-ready-test ()
   "Test subscribing to `prompt-ready' event."
@@ -4685,6 +4855,52 @@ A failed load stays on the fork."
     ;; A choice that was not offered signals an error.
     (let ((agent-shell-session-choices-function (lambda (_candidates) '(("Bogus" . :bogus)))))
       (should-error (agent-shell--apply-session-choices choices) :type 'user-error))))
+
+(ert-deftest agent-shell--filter-notice-test ()
+  "Test `agent-shell--filter-notice'."
+  ;; nil displays notices unchanged, ending in a newline.
+  (let ((agent-shell-notice-filter-function nil))
+    (should (equal (agent-shell--filter-notice
+                    :text "[idle-compaction] disarmed: prompt\n")
+                   "[idle-compaction] disarmed: prompt\n"))
+    (should (equal (agent-shell--filter-notice :text "Rate limited")
+                   "Rate limited\n")))
+  ;; The filter sees the text without its trailing newline.
+  (let* ((seen nil)
+         (agent-shell-notice-filter-function
+          (lambda (notice)
+            (setq seen (map-elt notice :text)))))
+    (agent-shell--filter-notice :text "[idle-compaction] armed\n")
+    (should (equal seen "[idle-compaction] armed")))
+  ;; Returning nil drops the notice.
+  (let ((agent-shell-notice-filter-function
+         (lambda (notice)
+           (unless (string-prefix-p "[idle-compaction]" (map-elt notice :text))
+             (map-elt notice :text)))))
+    (should-not (agent-shell--filter-notice
+                 :text "[idle-compaction] disarmed: prompt\n"))
+    (should (equal (agent-shell--filter-notice :text "Rate limited\n")
+                   "Rate limited\n")))
+  ;; Returning a string transforms the notice.
+  (let ((agent-shell-notice-filter-function
+         (lambda (notice)
+           (upcase (map-elt notice :text)))))
+    (should (equal (agent-shell--filter-notice
+                    :text "[idle-compaction] disarmed: prompt\n")
+                   "[IDLE-COMPACTION] DISARMED: PROMPT\n")))
+  ;; Returning a non-string displays the notice unfiltered.
+  (let ((agent-shell-notice-filter-function (lambda (_notice) 'nope))
+        (inhibit-message t))
+    (should (equal (agent-shell--filter-notice
+                    :text "[idle-compaction] disarmed: prompt\n")
+                   "[idle-compaction] disarmed: prompt\n")))
+  ;; A signalling filter displays the notice unfiltered.
+  (let ((agent-shell-notice-filter-function (lambda (_notice) (error "Boom")))
+        (debug-on-error nil)
+        (inhibit-message t))
+    (should (equal (agent-shell--filter-notice
+                    :text "[idle-compaction] disarmed: prompt\n")
+                   "[idle-compaction] disarmed: prompt\n"))))
 
 (ert-deftest agent-shell--prompt-select-session-new-shell-test ()
   "Test `agent-shell--prompt-select-session' returns nil for the new-shell choice."
@@ -8100,6 +8316,17 @@ prompt."
             :busy t)
            '(:asked-minibuffer nil :quoted-at-prompt t :ends-after-quote t))))
 
+(ert-deftest agent-shell--block-quote-survives-font-lock-test ()
+  "A quote keeps its face when font-lock fontifies the shell buffer."
+  (with-temp-buffer
+    (setq-local font-lock-defaults '(nil t))
+    (insert (agent-shell--block-quote "quoted"))
+    (font-lock-ensure)
+    (goto-char (point-min))
+    (search-forward "quoted")
+    (should (eq (get-text-property (match-beginning 0) 'font-lock-face)
+                'agent-shell-markdown-blockquote))))
+
 (ert-deftest agent-shell--can-insert-into-prompt-p-test ()
   "Text can go into the prompt unless the shell is busy with none live."
   (should (agent-shell-tests--with-persistent-prompt-shell
@@ -10805,6 +11032,15 @@ hides that."
       ;; insert an end-of-prompt marker of its own on the next update.
       (should-not (equal (map-elt rendered :last-entry-type) "user_message_chunk")))))
 
+(ert-deftest agent-shell-experimental--steered-prompt-prefix-property-test ()
+  "Only the `[steer] ' prefix carries `agent-shell-steer-prefix'.
+Chat mode hides that span and labels the prompt as steered instead."
+  (let* ((text (map-elt (agent-shell-tests--render-steered-prompt "filenames") :text))
+         (prefix (text-property-any 0 (length text) 'agent-shell-steer-prefix t text)))
+    (should (equal "[steer] "
+                   (substring text prefix (next-single-property-change
+                                           prefix 'agent-shell-steer-prefix text))))))
+
 (ert-deftest agent-shell-experimental--steered-image-preview-test ()
   "A steered image mention is displayed in the posted user message."
   (let* ((rendered (agent-shell-tests--render-steered-prompt
@@ -10944,6 +11180,27 @@ Then [after](https://after.example.com)
     (should (eq (char-after) ?1))
     (agent-shell-next-item)
     (should (looking-at-p "two"))))
+
+(ert-deftest agent-shell-next-item-lands-inside-a-blockquote ()
+  "Item navigation stops on a quote's first quoted character, past its bars."
+  (agent-shell-tests--with-rendered-shell
+      "Intro
+
+> > Quoted **text**
+> more
+
+After [link](https://after.com/x)
+"
+    (agent-shell-next-item)
+    (should (looking-at-p "Quoted"))
+    (agent-shell-next-item)
+    (should (looking-at-p "link"))
+    (agent-shell-previous-item)
+    (should (looking-at-p "Quoted"))
+    ;; From further inside the quote, back up to its start.
+    (search-forward "more")
+    (agent-shell-previous-item)
+    (should (looking-at-p "Quoted"))))
 
 (ert-deftest agent-shell-table-cells-claim-no-keys-of-their-own ()
   "A rendered table leaves the buffer's keys alone.
@@ -11500,6 +11757,36 @@ A directory that does not exist is an error, rather than leaving
         (when (file-directory-p dir)
           (delete-directory dir))))))
 
+(ert-deftest agent-shell--start-from-shell-in-switched-project-test ()
+  "Test that a shell started from a shell starts in a switched-to project.
+
+From within a shell, a new shell starts in that shell's directory,
+unless `project-switch-project' is running the command for another
+project, in which case it starts in that project's root."
+  (let* ((shell-dir (file-name-as-directory (make-temp-file "shell-" t)))
+         (project-dir (file-name-as-directory (make-temp-file "project-" t)))
+         (shell (agent-shell-tests--make-started-shell "started-shell" shell-dir))
+         (config (agent-shell-make-agent-config
+                  :buffer-name "Fake"
+                  :shell-prompt "Fake> "
+                  :shell-prompt-regexp "Fake> ")))
+    (unwind-protect
+        (cl-letf (((symbol-function 'shell-maker-start-v2)
+                   (lambda (&rest _)
+                     (throw 'agent-shell-tests--started default-directory))))
+          (make-directory (expand-file-name ".git" project-dir))
+          (with-current-buffer shell
+            (should (equal (catch 'agent-shell-tests--started
+                             (agent-shell--start :config config))
+                           shell-dir))
+            (let ((project-current-directory-override project-dir))
+              (should (equal (catch 'agent-shell-tests--started
+                               (agent-shell--start :config config))
+                             project-dir)))))
+      (kill-buffer shell)
+      (delete-directory shell-dir t)
+      (delete-directory project-dir t))))
+
 (ert-deftest agent-shell--send-command-renders-deferred-markup-in-viewport-test ()
   "Test the end of a turn renders the viewport's held-back markup too.
 
@@ -11591,6 +11878,18 @@ at or after point, which puts diagnostics from other lines at point."
       (cl-letf (((symbol-function 'flymake-diagnostics)
                  (lambda (&optional _beg _end) (list diagnostic))))
         (should-not (agent-shell--get-flymake-error-context))))))
+
+(ert-deftest agent-shell-active-message-hide-twice-test ()
+  "Hiding an active message a second time shows nothing."
+  (let ((active-message (agent-shell-active-message-show :text "Loading..."))
+        (messages nil))
+    (agent-shell-active-message-hide :active-message active-message)
+    (cl-letf (((symbol-function 'message)
+               (lambda (format-string &rest args)
+                 (when format-string
+                   (push (apply #'format format-string args) messages)))))
+      (agent-shell-active-message-hide :active-message active-message))
+    (should-not messages)))
 
 (provide 'agent-shell-tests)
 ;;; agent-shell-tests.el ends here
